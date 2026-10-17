@@ -1,0 +1,118 @@
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -2490,6 +2490,48 @@
+     sg_mesh_cull.unsupported++; return false;
+ }
+ 
++/* One mesh's original scalar/float words; every original destination is written. */
++static struct {
++    uint64_t consideredMeshes, eligibleMeshes, eligibleNormals, originalNormals;
++} sgStudioConstantStats;
++static qboolean SGStudioConstantLighting(int count,int index,vec3_t *normal,
++    byte *bone,float *lv,vec3_t color)
++{
++    sgStudioConstantStats.consideredMeshes++;
++    if(count>0 && r_studio_constant_light.value &&
++        RI.currententity->curstate.rendermode!=kRenderTransAdd &&
++        !(g_nFaceFlags&STUDIO_NF_CHROME) &&
++        ((g_nFaceFlags&(STUDIO_NF_FULLBRIGHT|STUDIO_NF_FLATSHADE)) ||
++            g_studio.shadelight==0.0f))
++    {
++        if(FBitSet(m_pStudioHeader->flags,STUDIO_HAS_BONEWEIGHTS))
++            R_StudioLighting(lv,-1,g_nFaceFlags,g_studio.norms[index]);
++        else R_StudioLighting(lv,*bone,g_nFaceFlags,(float *)normal);
++        VectorScale(g_studio.lightcolor,*lv,color);
++        sgStudioConstantStats.eligibleMeshes++;
++        sgStudioConstantStats.eligibleNormals+=count;
++        return true;
++    }
++    if(count>0)sgStudioConstantStats.originalNormals+=count;
++    return false;
++}
++
++
++void SGStudioConstantLightingReport(void)
++{
++#ifdef __EMSCRIPTEN__
++    EM_ASM({const s=Module["sgStudioConstantLighting"]||(Module["sgStudioConstantLighting"]={});
++      s.schemaVersion=1;s.enabled=Boolean($0);s.consideredMeshes=$1;s.eligibleMeshes=$2;
++      s.eligibleNormals=$3;s.originalNormals=$4;s.scalarCalculationsSaved=$5;
++      s.numericMetadataBytes=$6;s.drawLocalBytes=$7;},
++      r_studio_constant_light.value,(double)sgStudioConstantStats.consideredMeshes,
++      (double)sgStudioConstantStats.eligibleMeshes,(double)sgStudioConstantStats.eligibleNormals,
++      (double)sgStudioConstantStats.originalNormals,
++      (double)(sgStudioConstantStats.eligibleNormals-sgStudioConstantStats.eligibleMeshes),
++      sizeof(sgStudioConstantStats),sizeof(vec3_t));
++#endif
++}
++
+ static void R_StudioDrawPoints( void )
+ {
+ 	int		i, j, k, m_skinnum;
+@@ -2503,6 +2545,7 @@
+ 	mstudiomesh_t	*pmesh;
+ 	short		*pskinref;
+ 	float		lv_tmp;
++    vec3_t constantColor;
+ 
+ 	if( !m_pStudioHeader ) return;
+ 
+@@ -2572,6 +2615,12 @@
+ 		if( FBitSet( g_nFaceFlags, STUDIO_NF_MASKED|STUDIO_NF_ADDITIVE ))
+ 			need_sort = true;
+ 
++        if(SGStudioConstantLighting(pmesh[j].numnorms,k,pstudionorms,pnormbone,&lv_tmp,constantColor))
++        {
++            for(i=0;i<pmesh[j].numnorms;i++,k++,pstudionorms++,pnormbone++)
++                memcpy(g_studio.lightvalues[k],constantColor,sizeof(constantColor));
++            continue;
++        }
+ 		if( RI.currententity->curstate.rendermode == kRenderTransAdd )
+ 		{
+ 			for( i = 0; i < pmesh[j].numnorms; i++, k++, pstudionorms++, pnormbone++ )
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -822,6 +822,7 @@
+ extern convar_t	r_studio_mesh_cull;
+ extern convar_t	r_studio_clip_cache;
+ extern convar_t r_studio_client_states;
++extern convar_t r_studio_constant_light;
+ extern convar_t r_gl2_alpha_reuse;
+ extern convar_t r_gl2_vector_reuse;
+ void SGStudioMeshCullReport( void );
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -40,6 +40,7 @@
+ CVAR_DEFINE_AUTO( r_studio_mesh_cull, "0", FCVAR_GLCONFIG, "cull off-screen classic static studio meshes (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_clip_cache, "0", FCVAR_GLCONFIG, "reuse exact clip masks within one submodel draw (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_client_states, "0", FCVAR_GLCONFIG, "hold studio vertex/color client state per submodel (experimental)" );
++CVAR_DEFINE_AUTO( r_studio_constant_light, "0", FCVAR_GLCONFIG, "reuse original constant studio lighting per mesh" );
+ CVAR_DEFINE_AUTO( r_gl2_alpha_reuse, "0", FCVAR_GLCONFIG, "reuse exact alpha-reference uniforms per GL2 program" );
+ CVAR_DEFINE_AUTO( r_gl2_vector_reuse, "0", FCVAR_GLCONFIG, "reuse exact color/fog uniforms per GL2 program" );
+ CVAR_DEFINE( r_vbo, "gl_vbo", "0", FCVAR_GLCONFIG, "draw world using VBO (known to be glitchy)" );
+@@ -1167,6 +1168,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_cull );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_clip_cache );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_client_states );
++	gEngfuncs.Cvar_RegisterVariable( &r_studio_constant_light );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_gl2_alpha_reuse );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_gl2_vector_reuse );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo );
+--- a/ref/gl/gl_rmain.c
++++ b/ref/gl/gl_rmain.c
+@@ -17,6 +17,7 @@
+ void SGGL2AlphaReport(void);
+ void SGGL2VectorReport(void);
+ extern void SGStudioClientScopeReport( void );
++void SGStudioConstantLightingReport(void);
+ extern void SGStudioClientScopeReset( void );
+ extern void SGBaseReset(void);
+ extern void SGBaseReport(void);
+@@ -1164,6 +1165,7 @@
+ 	R_RenderScene();
+     SGStudioEncodeReuseReport();
+     SGStudioClientScopeReport();
++    SGStudioConstantLightingReport();
+     SGBaseReport();
+     SGGL2AlphaReport();
+     SGGL2VectorReport();

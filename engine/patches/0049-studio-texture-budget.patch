@@ -1,0 +1,118 @@
+diff --git a/ref/gl/gl_image.c b/ref/gl/gl_image.c
+index 1f7e925..6a439e9 100644
+--- a/ref/gl/gl_image.c
++++ b/ref/gl/gl_image.c
+@@ -35,10 +35,44 @@ static struct
+ {
+     size_t pendingBytes, peakPendingBytes, logicalPendingBytes;
+     unsigned int pendingCount, residentCount, reservedTotal, realizedTotal, failures, prerealizedTotal;
++    int textureCap, capKey; double capProjectedBytes, fullProjectedBytes;
+     double lastRealizeMs, maxRealizeMs, totalRealizeMs;
+ } sg_studio_residency;
+ static qboolean GL_EnsureStudioTexture( gl_texture_t *tex );
+ 
++/* Largest power-of-two size cap (none, 512, 256, 128) under which every deferred
++ * or realized MDL texture of the current map fits the configured budget, as
++ * RGBA with mips. Recomputed when new textures are reserved. Light maps get no
++ * cap; only maps that would exceed the budget lose top detail. */
++static int SGStudioTextureCap( void )
++{
++    static const int caps[] = { 0, 512, 256, 128 };
++    double totals[4] = { 0 }, budget = r_studio_texture_budget_mb.value * 1024.0 * 1024.0;
++    int i, c;
++    if( budget <= 0.0 ) return 0;
++    if( sg_studio_residency.capKey == (int)sg_studio_residency.reservedTotal + 1 ) return sg_studio_residency.textureCap;
++    for( i = 1; i < MAX_TEXTURES; i++ )
++    {
++        const gl_texture_t *tex = &gl_textures[i];
++        int w, h;
++        if( tex->studio_state == SG_STUDIO_ORDINARY || tex->studio_state == SG_STUDIO_FAILED ) continue;
++        w = tex->studio_pending ? tex->studio_pending->width : tex->srcWidth;
++        h = tex->studio_pending ? tex->studio_pending->height : tex->srcHeight;
++        for( c = 0; c < 4; c++ )
++        {
++            int sw = w, sh = h;
++            while( caps[c] && ( sw > caps[c] || sh > caps[c] )) { sw = Q_max( 1, sw >> 1 ); sh = Q_max( 1, sh >> 1 ); }
++            totals[c] += (double)sw * sh * 4.0 * 4.0 / 3.0;
++        }
++    }
++    for( c = 0; c < 3 && totals[c] > budget; c++ );
++    sg_studio_residency.textureCap = caps[c];
++    sg_studio_residency.capProjectedBytes = totals[c];
++    sg_studio_residency.fullProjectedBytes = totals[0];
++    sg_studio_residency.capKey = (int)sg_studio_residency.reservedTotal + 1;
++    return caps[c];
++}
++
+ void GL_StudioResidencyReport( void )
+ {
+ #ifdef __EMSCRIPTEN__
+@@ -48,12 +82,13 @@ void GL_StudioResidencyReport( void )
+         s.pendingBytes=$0; s.peakPendingBytes=$1; s.pendingCount=$2; s.residentCount=$3;
+         s.reservedTotal=$4; s.realizedTotal=$5; s.failures=$6; s.pendingBudgetBytes=$7;
+         s.lastRealizeMs=$8; s.maxRealizeMs=$9; s.totalRealizeMs=$10; s.logicalPendingBytes=$11; s.prerealizedTotal=$12;
++        s.textureCap=$13; s.capProjectedBytes=$14; s.fullProjectedBytes=$15;
+     }, (double)sg_studio_residency.pendingBytes, (double)sg_studio_residency.peakPendingBytes,
+        sg_studio_residency.pendingCount, sg_studio_residency.residentCount,
+        sg_studio_residency.reservedTotal, sg_studio_residency.realizedTotal,
+        sg_studio_residency.failures, SG_STUDIO_PENDING_BUDGET,
+        sg_studio_residency.lastRealizeMs, sg_studio_residency.maxRealizeMs, sg_studio_residency.totalRealizeMs, (double)sg_studio_residency.logicalPendingBytes,
+-       sg_studio_residency.prerealizedTotal);
++       sg_studio_residency.prerealizedTotal, sg_studio_residency.textureCap, sg_studio_residency.capProjectedBytes, sg_studio_residency.fullProjectedBytes);
+ #endif
+ }
+ 
+@@ -443,6 +478,7 @@ static void SGGpuProfile( sg_gpu_upload_profile_t *profile )
+     memset(profile,0,sizeof(*profile));
+     profile->npot=GL_Support(GL_ARB_TEXTURE_NPOT_EXT);
+     profile->maxTextureSize=glConfig.max_2d_texture_size;
++    { int cap=SGStudioTextureCap(); if(cap>0&&cap<profile->maxTextureSize) profile->maxTextureSize=cap; }
+     profile->desktopBits=gpGlobals->desktopBitsPixel;
+     profile->quake=ENGINE_GET_PARM(PARM_QUAKE_COMPATIBLE);
+     profile->multisamples=glConfig.max_multisamples;
+@@ -1370,6 +1406,13 @@ static void GL_SetTextureDimensions( gl_texture_t *tex, int width, int height, i
+ 		Assert( false );
+ 	}
+ 
++	// Budgeted MDL textures resample to the map's cap during realization.
++	if( tex->studio_state == SG_STUDIO_RESOLVING && tex->target == GL_TEXTURE_2D )
++	{
++		int cap = SGStudioTextureCap();
++		if( cap > 0 && cap < maxTextureSize ) maxTextureSize = cap;
++	}
++
+ 	// store original sizes
+ 	tex->srcWidth = width;
+ 	tex->srcHeight = height;
+diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
+index 37e0dc6..a96b709 100644
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -816,6 +816,7 @@ extern convar_t	r_static_lightmap_batch;
+ extern convar_t r_base_surface_batch;
+ extern convar_t	r_studio_texture_defer;
+ extern convar_t	r_studio_prerealize_ms;
++extern convar_t	r_studio_texture_budget_mb;
+ extern convar_t r_studio_source_compress;
+ extern convar_t r_studio_source_share;
+ extern convar_t r_studio_gpu_share;
+diff --git a/ref/gl/gl_opengl.c b/ref/gl/gl_opengl.c
+index 527ef28..6cc36ac 100644
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -34,6 +34,7 @@ CVAR_DEFINE_AUTO( r_static_lightmap_batch, "0", FCVAR_GLCONFIG, "batch static li
+ CVAR_DEFINE_AUTO( r_base_surface_batch, "0", FCVAR_GLCONFIG, "batch owned opaque base surfaces" );
+ CVAR_DEFINE_AUTO( r_studio_texture_defer, "0", FCVAR_GLCONFIG, "defer eligible MDL texture uploads until first use (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_prerealize_ms, "0", FCVAR_GLCONFIG, "realize deferred MDL textures between frames, milliseconds per frame (experimental)" );
++CVAR_DEFINE_AUTO( r_studio_texture_budget_mb, "0", FCVAR_GLCONFIG, "cap deferred MDL texture size so the map fits this many MiB (0 off, experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_gpu_share, "0", FCVAR_GLCONFIG, "share exact deferred studio GPU objects (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_source_share, "0", FCVAR_GLCONFIG, "share exact owned packed studio sources (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_encode_reuse, "0", FCVAR_GLCONFIG, "reuse exact live encoded studio sources before compression (experimental)" );
+@@ -1177,6 +1178,7 @@ static void GL_InitCommands( void )
+ 	gEngfuncs.Cvar_RegisterVariable( &r_base_surface_batch );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_texture_defer );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_prerealize_ms );
++	gEngfuncs.Cvar_RegisterVariable( &r_studio_texture_budget_mb );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_compress );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_share );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_gpu_share );

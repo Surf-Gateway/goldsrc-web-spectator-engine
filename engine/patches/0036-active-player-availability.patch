@@ -1,0 +1,18 @@
+--- a/engine/client/cl_frame.c
++++ b/engine/client/cl_frame.c
+@@ -57,7 +57,14 @@
+ 	unsigned int mask = 0;
+ 	int i;
+ 	for( i = 0; i < 16; i++ )
+-		if( CL_GetPlayerDisplayTime( first + i ) >= 0.0 ) mask |= 1u << i;
++	{
++		int slot = first + i;
++		// Match CS16Client's IsActivePlayer predicate as well as pose identity.
++		// A rostered dead/non-solid entity cannot supply an in-eye camera.
++		if( CL_GetPlayerDisplayTime( slot ) < 0.0 || !clgame.entities ) continue;
++		if( clgame.entities[slot].player && clgame.entities[slot].curstate.solid != SOLID_NOT )
++			mask |= 1u << i;
++	}
+ 	return mask;
+ }
+ 

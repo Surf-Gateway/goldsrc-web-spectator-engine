@@ -1,0 +1,25 @@
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -782,7 +782,11 @@
+ 			}
+ 			GL_SetExtension( extid, true ); // required to be supported by wrapper
+ 
++#if defined( __EMSCRIPTEN__ )
++			pglGetIntegerv( GL_MAX_TEXTURE_IMAGE_UNITS_ARB, &glConfig.max_texture_units );
++#else
+ 			pglGetIntegerv( GL_MAX_TEXTURE_UNITS_ARB, &glConfig.max_texture_units );
++#endif
+ 			if( glConfig.max_texture_units <= 1 )
+ 				pglGetIntegerv( GL_MAX_TEXTURE_IMAGE_UNITS_ARB, &glConfig.max_texture_units );
+ 			if( glConfig.max_texture_units <= 1 )
+@@ -1026,8 +1030,10 @@
+ 	glConfig.version_string = (const char *)pglGetString( GL_VERSION );
+ 	glConfig.extensions_string = (const char *)pglGetString( GL_EXTENSIONS );
+ 
++#if !defined( __EMSCRIPTEN__ )
+ 	pglGetIntegerv( GL_MAJOR_VERSION, &major );
+ 	pglGetIntegerv( GL_MINOR_VERSION, &minor );
++#endif
+ 	if( !major && glConfig.version_string )
+ 	{
+ 		const char *str = glConfig.version_string;

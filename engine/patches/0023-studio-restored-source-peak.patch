@@ -1,0 +1,10 @@
+--- a/ref/gl/gl_image.c
++++ b/ref/gl/gl_image.c
+@@ -127,6 +127,7 @@
+     tex->studio_codec_scratch=NULL;
+     tex->studio_pending_bytes+=restored-tex->studio_codec_bytes;
+     sg_studio_residency.pendingBytes+=restored-tex->studio_codec_bytes;
++    sg_studio_residency.peakPendingBytes=Q_max(sg_studio_residency.peakPendingBytes,sg_studio_residency.pendingBytes);
+     tex->studio_codec_bytes=0;sg_studio_codec.decoded++;SGStudioCodecReport();return true;
+ }
+ 

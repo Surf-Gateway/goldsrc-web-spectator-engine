@@ -1,0 +1,118 @@
+--- a/ref/gl/gl2_shim/gl2_shim.c
++++ b/ref/gl/gl2_shim/gl2_shim.c
+@@ -71,6 +71,7 @@
+ 	GLint ufog;
+ 	GLint uMVP;
+ 	GLuint *vao_begin;
++	uint32_t sgAlphaBits, sgAlphaValid;
+ } gl2wrap_prog_t;
+ 
+ static const char *gl2wrap_vert_src =
+@@ -174,6 +175,36 @@
+ static void (APIENTRY *rpglBindBufferARB)( GLenum buf, GLuint obj );
+ 
+ static void GL2_FreeArrays( void );
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
++/* Exact private GL2 program ownership only. Cache payload: 32 * 8 bytes. */
++static struct { uint64_t requested, submitted, skipped, constructionResets; } sgAlphaReuse;
++static void SGGL2AlphaReset(gl2wrap_prog_t *prog)
++{
++    prog->sgAlphaValid=0;sgAlphaReuse.constructionResets++;
++}
++static void SGGL2AlphaUniform(gl2wrap_prog_t *prog,GLfloat value)
++{
++    uint32_t bits=0;const int enabled=r_gl2_alpha_reuse.value!=0;
++    sgAlphaReuse.requested++;
++    if(enabled){
++        memcpy(&bits,&value,sizeof(bits));
++        if(prog->sgAlphaValid&&prog->sgAlphaBits==bits){sgAlphaReuse.skipped++;return;}
++    }else prog->sgAlphaValid=0;
++    pglUniform1fARB(prog->ualpha,value);sgAlphaReuse.submitted++;
++    if(enabled){prog->sgAlphaBits=bits;prog->sgAlphaValid=1;}
++}
++void SGGL2AlphaReport(void)
++{
++#ifdef __EMSCRIPTEN__
++    EM_ASM({const s=Module["sgAlphaReuse"]||(Module["sgAlphaReuse"]={});s.schemaVersion=1;
++      s.enabled=Boolean($0);s.requested=$1;s.submitted=$2;s.skipped=$3;s.constructionResets=$4;
++      s.maxPrograms=32;s.numericMetadataBytes=288;},r_gl2_alpha_reuse.value,
++      (double)sgAlphaReuse.requested,(double)sgAlphaReuse.submitted,(double)sgAlphaReuse.skipped,(double)sgAlphaReuse.constructionResets);
++#endif
++}
++
+ 
+ #ifdef QUAD_BATCH
+ static void GL2_FlushPrims( void );
+@@ -310,6 +341,7 @@
+ 	gEngfuncs.Con_DPrintf( S_NOTE "%s: Generating progs for 0x%04x\n", __func__, flags );
+ 	prog = &gl2wrap.progs[i];
+ 	prog->flags = flags;
++	SGGL2AlphaReset(prog);
+ 
+ 	vp = GL2_GenerateShader( prog, GL_VERTEX_SHADER_ARB );
+ 	fp = GL2_GenerateShader( prog, GL_FRAGMENT_SHADER_ARB );
+@@ -427,7 +459,7 @@
+ 		if( gl2wrap.uchanged )
+ 		{
+ 			if( prog->ualpha >= 0 )
+-				pglUniform1fARB( prog->ualpha, gl2wrap.alpharef );
++				SGGL2AlphaUniform( prog, gl2wrap.alpharef );
+ 			if( prog->ucolor >= 0 )
+ 				pglUniform4fvARB( prog->ucolor, 1, gl2wrap.color );
+ 			if( prog->ufog >= 0 )
+@@ -1851,3 +1883,7 @@
+ 	GL2_AllocArrays();
+ }
+ #endif
++
++#if XASH_GL_STATIC
++void SGGL2AlphaReport(void){}
++#endif
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -821,6 +821,7 @@
+ extern convar_t	r_studio_mesh_cull;
+ extern convar_t	r_studio_clip_cache;
+ extern convar_t r_studio_client_states;
++extern convar_t r_gl2_alpha_reuse;
+ void SGStudioMeshCullReport( void );
+ extern convar_t	r_vbo;
+ extern convar_t	r_vbo_dlightmode;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -39,6 +39,7 @@
+ CVAR_DEFINE_AUTO( r_studio_mesh_cull, "0", FCVAR_GLCONFIG, "cull off-screen classic static studio meshes (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_clip_cache, "0", FCVAR_GLCONFIG, "reuse exact clip masks within one submodel draw (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_client_states, "0", FCVAR_GLCONFIG, "hold studio vertex/color client state per submodel (experimental)" );
++CVAR_DEFINE_AUTO( r_gl2_alpha_reuse, "0", FCVAR_GLCONFIG, "reuse exact alpha-reference uniforms per GL2 program" );
+ CVAR_DEFINE( r_vbo, "gl_vbo", "0", FCVAR_GLCONFIG, "draw world using VBO (known to be glitchy)" );
+ CVAR_DEFINE( r_vbo_detail, "gl_vbo_detail", "0", FCVAR_GLCONFIG, "detail vbo mode (0: disable, 1: multipass, 2: singlepass, broken decal dlights)" );
+ CVAR_DEFINE( r_vbo_dlightmode, "gl_vbo_dlightmode", "1", FCVAR_GLCONFIG, "vbo dlight rendering mode (0-1)" );
+@@ -1163,6 +1164,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_cull );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_clip_cache );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_client_states );
++	gEngfuncs.Cvar_RegisterVariable( &r_gl2_alpha_reuse );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_dlightmode );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_overbrightmode );
+--- a/ref/gl/gl_rmain.c
++++ b/ref/gl/gl_rmain.c
+@@ -14,6 +14,7 @@
+ */
+ 
+ #include "gl_local.h"
++void SGGL2AlphaReport(void);
+ extern void SGStudioClientScopeReport( void );
+ extern void SGStudioClientScopeReset( void );
+ extern void SGStudioEncodeReuseReport( void );
+@@ -1159,6 +1160,7 @@
+ 	R_RenderScene();
+     SGStudioEncodeReuseReport();
+     SGStudioClientScopeReport();
++    SGGL2AlphaReport();
+ 	SGStudioMeshCullReport();
+     SGClipCacheReport();
+ 	SGStudioMeshArraysReport();

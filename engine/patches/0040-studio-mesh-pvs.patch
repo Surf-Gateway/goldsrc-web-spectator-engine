@@ -1,0 +1,155 @@
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -14,6 +14,7 @@
+ */
+ 
+ #include "gl_local.h"
++#include <stdint.h>
+ #ifdef __EMSCRIPTEN__
+ #include <emscripten.h>
+ #endif
+@@ -2405,6 +2406,90 @@
+         r_studio_mesh_cull.value&&r_studio_clip_cache.value,sgClipStats.calls,sgClipStats.reused,sgClipStats.computed,
+         sgClipStats.pointChanges,sgClipStats.frustumChanges,sgClipStats.preparedDraws,sgClipStats.draws,
+         sgClipStats.clearedBytes,MAXSTUDIOVERTS,(double)sizeof(sgClipRecords),SG_CLIP_CACHE_METADATA_LIMIT);
++#endif
++}
++
++static struct
++{
++    double checked, culled, retained, fallback;
++} sg_mesh_pvs;
++
++// Only validated classic BSP trees qualify. Any incomplete traversal retains
++// geometry; neither a truncated leaf list nor an invalid pointer proves hidden.
++static qboolean SGStudioPvsRange( const void *pointer, const void *base, size_t count, size_t stride )
++{
++    uintptr_t address=(uintptr_t)pointer, start=(uintptr_t)base;
++    if( !base || !stride || !count || count > SIZE_MAX / stride ) return false;
++    return address >= start && address - start < count * stride && !((address - start) % stride);
++}
++
++static qboolean SGStudioPvsBoxVisible( const vec3_t mins, const vec3_t maxs )
++{
++    const model_t *world=WORLDMODEL;
++    const mnode_t *stack[128];
++    size_t pending=1, visited=0, touched=0;
++    if( !mins || !maxs || !world || !world->nodes || !world->leafs || world->numnodes <= 0 ||
++        world->numleafs <= 0 || world->numleafs > MAX_MAP_LEAFS ||
++        world->numplanes <= 0 || !world->planes || (world->flags & MODEL_QBSP2) ) return true;
++    stack[0]=world->nodes;
++    while( pending )
++    {
++        const mnode_t *node=stack[--pending];
++        int sides;
++        if( ++visited > 8192 ) return true;
++        if( SGStudioPvsRange(node,world->nodes,world->numnodes,sizeof(*node)) )
++        {
++            if( node->contents != 0 || !SGStudioPvsRange(node->plane,world->planes,
++                world->numplanes,sizeof(*node->plane)) ) return true;
++            sides=BOX_ON_PLANE_SIDE(mins,maxs,node->plane);
++            if( sides < 1 || sides > 3 ) return true;
++            if( sides & 1 )
++            {
++                if( pending >= 128 ) return true;
++                stack[pending++]=node_child(node,0,world);
++            }
++            if( sides & 2 )
++            {
++                if( pending >= 128 ) return true;
++                stack[pending++]=node_child(node,1,world);
++            }
++        }
++        else if( SGStudioPvsRange(node,world->leafs,(size_t)world->numleafs+1,sizeof(*world->leafs)) )
++        {
++            const mleaf_t *leaf=(const mleaf_t *)node;
++            if( leaf->contents == CONTENTS_SOLID ) continue;
++            if( leaf->contents >= 0 || leaf->cluster < 0 || leaf->cluster >= world->numleafs ) return true;
++            touched++;
++            if( CHECKVISBIT(RI.visbytes,leaf->cluster) ) return true;
++        }
++        else return true;
++    }
++    return touched == 0;
++}
++
++static qboolean SGStudioMeshPvsOutside( const vec3_t mins, const vec3_t maxs )
++{
++    if( !r_studio_mesh_pvs.value ) return false;
++    sg_mesh_pvs.checked++;
++    // The caller has already validated static opaque world geometry and its
++    // transformed padded bounds. Unknown/disabled/custom PVS retains geometry.
++    if( !WORLDMODEL || !WORLDMODEL->visdata || !RI.viewleaf ||
++        RI.viewleaf->contents == CONTENTS_SOLID || RI.drawOrtho ||
++        tr.fCustomRendering || r_novis.value || r_lockpvs.value )
++    { sg_mesh_pvs.fallback++; return false; }
++    if( SGStudioPvsBoxVisible( mins, maxs ))
++    { sg_mesh_pvs.retained++; return false; }
++    sg_mesh_pvs.culled++; return true;
++}
++
++void SGStudioMeshPvsReport( void )
++{
++#ifdef __EMSCRIPTEN__
++    EM_ASM({
++        const s=Module["sgStudioMeshPvs"]??={};
++        s.enabled=Boolean($0);s.checked=$1;s.culled=$2;s.retained=$3;s.fallback=$4;
++    }, r_studio_mesh_pvs.value!=0, sg_mesh_pvs.checked, sg_mesh_pvs.culled,
++       sg_mesh_pvs.retained, sg_mesh_pvs.fallback);
+ #endif
+ }
+ 
+@@ -2461,6 +2546,7 @@
+     // Retain geometry on planes despite renderer/driver float rounding.
+     for( axis = 0; axis < 3; axis++ ) { mins[axis] -= 0.125f; maxs[axis] += 0.125f; }
+     if( R_CullBox( mins, maxs )) { sg_mesh_cull.culled++; return true; }
++    if( SGStudioMeshPvsOutside( mins, maxs )) { sg_mesh_cull.culled++; return true; }
+     // A large union box can intersect the view although its separated triangles
+     // cannot. Keep the complete original draw if any triangle might survive.
+     SGClipCacheSyncFrustum();
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -821,6 +821,7 @@
+ extern convar_t	r_studio_mesh_compact;
+ void SGStudioMeshArraysReport( void );
+ extern convar_t	r_studio_mesh_cull;
++extern convar_t	r_studio_mesh_pvs;
+ extern convar_t	r_studio_clip_cache;
+ extern convar_t r_studio_client_states;
+ extern convar_t r_studio_constant_light;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -39,6 +39,7 @@
+ CVAR_DEFINE_AUTO( r_studio_source_compress, "0", FCVAR_GLCONFIG, "losslessly compress owned pending studio sources (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_mesh_compact, "0", FCVAR_GLCONFIG, "submit only current studio mesh arrays" );
+ CVAR_DEFINE_AUTO( r_studio_mesh_cull, "0", FCVAR_GLCONFIG, "cull off-screen classic static studio meshes (experimental)" );
++CVAR_DEFINE_AUTO( r_studio_mesh_pvs, "0", FCVAR_GLCONFIG, "static studio mesh PVS rejection (candidate)" );
+ CVAR_DEFINE_AUTO( r_studio_clip_cache, "0", FCVAR_GLCONFIG, "reuse exact clip masks within one submodel draw (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_client_states, "0", FCVAR_GLCONFIG, "hold studio vertex/color client state per submodel (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_constant_light, "0", FCVAR_GLCONFIG, "reuse original constant studio lighting per mesh" );
+@@ -1168,6 +1169,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_encode_reuse );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_compact );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_cull );
++	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_pvs );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_clip_cache );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_client_states );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_constant_light );
+--- a/ref/gl/gl_rmain.c
++++ b/ref/gl/gl_rmain.c
+@@ -14,6 +14,7 @@
+ */
+ 
+ #include "gl_local.h"
++extern void SGStudioMeshPvsReport( void );
+ void SGGL2AlphaReport(void);
+ void SGGL2VectorReport(void);
+ extern void SGStudioClientScopeReport( void );
+@@ -1170,6 +1171,7 @@
+     SGGL2AlphaReport();
+     SGGL2VectorReport();
+ 	SGStudioMeshCullReport();
++	SGStudioMeshPvsReport();
+     SGClipCacheReport();
+ 	SGStudioMeshArraysReport();
+ 

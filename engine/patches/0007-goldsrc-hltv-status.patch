@@ -1,0 +1,76 @@
+--- a/engine/client/cl_parse.c
++++ b/engine/client/cl_parse.c
+@@ -2088,7 +2088,7 @@
+ sended from game.dll
+ ==============
+ */
+-void CL_ParseHLTV( sizebuf_t *msg )
++void CL_ParseHLTV( sizebuf_t *msg, connprotocol_t proto )
+ {
+ 	switch( MSG_ReadByte( msg ))
+ 	{
+@@ -2097,12 +2097,22 @@
+ 		cls.spectator = true;
+ 		break;
+ 	case HLTV_STATUS:
++		if( proto == PROTO_GOLDSRC )
++		{
++			// ReHLDS Status::SendStatusUpdate: proxies u16, slots u32, viewers u32.
++			MSG_ReadWord( msg );
++			MSG_ReadLong( msg );
++			MSG_ReadLong( msg );
++		}
++		else
++		{
+ 			MSG_ReadLong( msg );
+ 			MSG_ReadShort( msg );
+ 			MSG_ReadWord( msg );
+ 			MSG_ReadLong( msg );
+ 			MSG_ReadLong( msg );
+ 			MSG_ReadWord( msg );
++		}
+ 		break;
+ 	case HLTV_LISTEN:
+ 		cls.signon = SIGNONS;
+@@ -2749,7 +2759,7 @@
+ 			CL_ParseFileTransferFailed( msg );
+ 			break;
+ 		case svc_hltv:
+-			CL_ParseHLTV( msg );
++			CL_ParseHLTV( msg, PROTO_CURRENT );
+ 			break;
+ 		case svc_voiceinit:
+ 			CL_ParseVoiceInit( msg );
+--- a/engine/client/cl_parse_48.c
++++ b/engine/client/cl_parse_48.c
+@@ -564,7 +564,7 @@
+ 			CL_ParseFileTransferFailed( msg );
+ 			break;
+ 		case svc_hltv:
+-			CL_ParseHLTV( msg );
++			CL_ParseHLTV( msg, PROTO_LEGACY );
+ 			break;
+ 		case svc_resourcelocation:
+ 			CL_ParseResLocation( msg );
+--- a/engine/client/cl_parse_gs.c
++++ b/engine/client/cl_parse_gs.c
+@@ -748,7 +748,7 @@
+ 			CL_ParseFileTransferFailed( msg );
+ 			break;
+ 		case svc_hltv:
+-			CL_ParseHLTV( msg );
++			CL_ParseHLTV( msg, PROTO_GOLDSRC );
+ 			break;
+ 		case svc_voiceinit:
+ 			CL_ParseVoiceInit( msg );
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -920,7 +920,7 @@
+ void CL_ParseCrosshairAngle( sizebuf_t *msg );
+ void CL_ParseSoundFade( sizebuf_t *msg );
+ void CL_ParseFileTransferFailed( sizebuf_t *msg );
+-void CL_ParseHLTV( sizebuf_t *msg );
++void CL_ParseHLTV( sizebuf_t *msg, connprotocol_t proto );
+ void CL_ParseDirector( sizebuf_t *msg );
+ void CL_ParseVoiceInit( sizebuf_t *msg );
+ void CL_ParseVoiceData( sizebuf_t *msg, connprotocol_t proto );

@@ -1,0 +1,30 @@
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -370,6 +370,7 @@
+ ==================
+ */
+ static int sgPreviousPlayersLow = -1, sgPreviousPlayersHigh = -1;
++static int sgSpectatorViewOnly = -1;
+ 
+ void V_ResetPlayerAvailability( void )
+ {
+@@ -415,6 +416,19 @@
+ 	do
+ 	{
+ 		clgame.dllFuncs.pfnCalcRefdef( &rp );
++#ifdef __EMSCRIPTEN__
++		// This local app policy also covers recursive loading/reconnect draws,
++		// where temporary client state may no longer identify an HLTV stream.
++		if( sgSpectatorViewOnly < 0 ) sgSpectatorViewOnly = Sys_CheckParm( "-sg-spectator-only" ) != 0;
++		if( sgSpectatorViewOnly &&
++			CL_GetPlayerDisplayTime( (int)Cvar_VariableValue( "_sg_web_target" )) < 0.0 )
++		{
++			ref.dllFuncs.R_ClearScreen();
++			ref.dllFuncs.GL_BackendEndFrame();
++			EM_ASM({ if(Module["onSGWaiting"]) Module["onSGWaiting"]($0); }, rp.time);
++			return;
++		}
++#endif
+ 		V_GetRefParams( &rp, &rvp );
+ 		V_RefApplyOverview( &rvp );
+ 

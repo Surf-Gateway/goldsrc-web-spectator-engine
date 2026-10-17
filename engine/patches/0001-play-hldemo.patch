@@ -1,0 +1,429 @@
+diff --git a/engine/client/cl_demo.c b/engine/client/cl_demo.c
+index 10b76b7..68363ae 100644
+--- a/engine/client/cl_demo.c
++++ b/engine/client/cl_demo.c
+@@ -218,6 +218,10 @@ double CL_GetDemoFramerate( void )
+ {
+ 	if( cls.timedemo )
+ 		return 0.0;
++	// HLTV's HLDEMO header has no recorded host FPS. Its network update
++	// cadence must not throttle interpolated rendering to MIN_FPS.
++	if( cls.demoplayback == DEMO_HLDEMO )
++		return bound( MIN_FPS, Cvar_VariableValue( "fps_max" ), MAX_FPS_HARD );
+ 	return bound( MIN_FPS, demo.header.host_fps, MAX_FPS_HARD );
+ }
+ 
+@@ -933,6 +933,8 @@ static qboolean CL_DemoReadMessageQuake( byte *buffer, size_t *length )
+ 	return true;
+ }
+ 
++static qboolean CL_DemoReadMessageGoldSrc( byte *buffer, size_t *length );
++
+ /*
+ =================
+ CL_DemoReadMessage
+@@ -956,6 +958,9 @@ qboolean CL_DemoReadMessage( byte *buffer, size_t *length )
+ 		return false;
+ 	}
+ 
++	if( cls.demoplayback == DEMO_HLDEMO )
++		return CL_DemoReadMessageGoldSrc( buffer, length );
++
+ 	if(( !cl.background && ( cl.paused || cls.key_dest != key_game )) || cls.key_dest == key_console )
+ 	{
+ 		demo.starttime += host.frametime;
+@@ -1505,6 +1510,309 @@ static qboolean CL_ParseDemoHeader( const char *callee, const char *filename, fi
+ 	return true;
+ }
+ 
++#define HLDEMO_INFO_SIZE 436
++#define HLDEMO_SEQUENCE_SIZE 28
++#define HLDEMO_MAX_ENTRIES 8
++
++typedef struct
++{
++	int count;
++	int index;
++	int offset[HLDEMO_MAX_ENTRIES];
++	int end[HLDEMO_MAX_ENTRIES];
++} hldemo_directory_t;
++
++static hldemo_directory_t hldemo_directory;
++
++static qboolean CL_GoldSrcRead( void *dst, int bytes )
++{
++	fs_offset_t pos = FS_Tell( cls.demofile );
++	fs_offset_t limit = hldemo_directory.count ? hldemo_directory.end[hldemo_directory.index] : FS_FileLength( cls.demofile );
++	if( bytes < 0 || pos < 0 || pos > limit || bytes > limit - pos )
++		return false;
++	return FS_Read( cls.demofile, dst, bytes ) == bytes;
++}
++
++static qboolean CL_GoldSrcSkip( int bytes )
++{
++	fs_offset_t pos = FS_Tell( cls.demofile );
++	fs_offset_t limit = hldemo_directory.end[hldemo_directory.index];
++	if( bytes < 0 || pos < 0 || pos > limit || bytes > limit - pos )
++		return false;
++	return FS_Seek( cls.demofile, bytes, SEEK_CUR ) != -1;
++}
++
++static qboolean CL_GoldSrcNextEntry( void )
++{
++	hldemo_directory.index++;
++
++	if( hldemo_directory.index >= hldemo_directory.count )
++	{
++		CL_DemoCompleted();
++		return false;
++	}
++
++	if( FS_Seek( cls.demofile, hldemo_directory.offset[hldemo_directory.index], SEEK_SET ) == -1 )
++	{
++		CL_DemoCompleted();
++		return false;
++	}
++
++	demo.starttime = CL_GetDemoPlaybackClock();
++	demo.framecount = 0;
++	return true;
++}
++
++static qboolean CL_OpenGoldSrcDemo( void )
++{
++	byte stamp[8];
++	int demo_protocol, net_protocol, map_crc, directory_offset, entry_count, i;
++	char map_name[260];
++	char game_dir[260];
++
++	memset( &hldemo_directory, 0, sizeof( hldemo_directory ));
++
++	if( !CL_GoldSrcRead( stamp, sizeof( stamp )) || memcmp( stamp, "HLDEMO", 6 ))
++	{
++		Con_Printf( S_ERROR "HLDEMO: missing stamp\n" );
++		return false;
++	}
++
++	if( !CL_GoldSrcRead( &demo_protocol, sizeof( demo_protocol ))
++		|| !CL_GoldSrcRead( &net_protocol, sizeof( net_protocol ))
++		|| !CL_GoldSrcRead( map_name, sizeof( map_name ))
++		|| !CL_GoldSrcRead( game_dir, sizeof( game_dir ))
++		|| !CL_GoldSrcRead( &map_crc, sizeof( map_crc ))
++		|| !CL_GoldSrcRead( &directory_offset, sizeof( directory_offset )))
++	{
++		Con_Printf( S_ERROR "HLDEMO: truncated header\n" );
++		return false;
++	}
++
++	map_name[sizeof( map_name ) - 1] = 0;
++	game_dir[sizeof( game_dir ) - 1] = 0;
++
++	if( demo_protocol != 5 || net_protocol != 48 )
++	{
++		Con_Printf( S_ERROR "HLDEMO: unsupported protocol demo %d net %d\n", demo_protocol, net_protocol );
++		return false;
++	}
++
++	if( directory_offset < 544 || directory_offset > FS_FileLength( cls.demofile ) - 4
++		|| FS_Seek( cls.demofile, directory_offset, SEEK_SET ) == -1
++		|| !CL_GoldSrcRead( &entry_count, sizeof( entry_count ))
++		|| entry_count < 1 || entry_count > HLDEMO_MAX_ENTRIES )
++	{
++		Con_Printf( S_ERROR "HLDEMO: bad directory\n" );
++		return false;
++	}
++
++	for( i = 0; i < entry_count; i++ )
++	{
++		int type, flags, cd_track, frames, offset, length;
++		float track_time;
++		char description[64];
++
++		if( !CL_GoldSrcRead( &type, sizeof( type ))
++			|| !CL_GoldSrcRead( description, sizeof( description ))
++			|| !CL_GoldSrcRead( &flags, sizeof( flags ))
++			|| !CL_GoldSrcRead( &cd_track, sizeof( cd_track ))
++			|| !CL_GoldSrcRead( &track_time, sizeof( track_time ))
++			|| !CL_GoldSrcRead( &frames, sizeof( frames ))
++			|| !CL_GoldSrcRead( &offset, sizeof( offset ))
++			|| !CL_GoldSrcRead( &length, sizeof( length )))
++		{
++			Con_Printf( S_ERROR "HLDEMO: truncated directory entry\n" );
++			return false;
++		}
++
++		if( offset < 544 || offset > directory_offset || length < 9 || length > directory_offset - offset )
++		{
++			Con_Printf( S_ERROR "HLDEMO: invalid entry bounds\n" );
++			return false;
++		}
++		hldemo_directory.offset[i] = offset;
++		hldemo_directory.end[i] = offset + length;
++	}
++
++	hldemo_directory.count = entry_count;
++	hldemo_directory.index = 0;
++
++	if( FS_Seek( cls.demofile, hldemo_directory.offset[0], SEEK_SET ) == -1 )
++	{
++		Con_Printf( S_ERROR "HLDEMO: cannot seek to first entry\n" );
++		return false;
++	}
++
++	cls.legacymode = PROTO_GOLDSRC;
++	CL_DemoStartPlayback( DEMO_HLDEMO );
++	cl.background = true;
++	Con_Printf( "HLDEMO: map %s, game %s\n", map_name, game_dir );
++	return true;
++}
++
++static qboolean CL_DemoReadMessageGoldSrc( byte *buffer, size_t *length )
++{
++	float elapsed;
++
++	*length = 0;
++
++	while( cls.demofile )
++	{
++		fs_offset_t command_pos;
++		byte cmd;
++		float time;
++		int frame, message_length;
++
++		if( hldemo_directory.index >= hldemo_directory.count )
++		{
++			CL_DemoCompleted();
++			return false;
++		}
++
++		command_pos = FS_Tell( cls.demofile );
++		if( command_pos < 0 || command_pos >= hldemo_directory.end[hldemo_directory.index] )
++		{
++			if( !CL_GoldSrcNextEntry( ))
++				return false;
++			continue;
++		}
++
++		if( !CL_GoldSrcRead( &cmd, sizeof( cmd ))
++			|| !CL_GoldSrcRead( &time, sizeof( time ))
++			|| !CL_GoldSrcRead( &frame, sizeof( frame )))
++		{
++			CL_DemoCompleted();
++			return false;
++		}
++
++		if( !isfinite( time ) )
++		{
++			CL_DemoCompleted();
++			return false;
++		}
++
++		if( cmd == 2 )
++			continue;
++
++		if( cmd == 5 )
++		{
++			if( !CL_GoldSrcNextEntry( ))
++				return false;
++			continue;
++		}
++
++		if( cmd == 3 )
++		{
++			if( !CL_GoldSrcSkip( 64 ))
++				return false;
++			continue;
++		}
++
++		if( cmd == 4 )
++		{
++			if( !CL_GoldSrcSkip( 32 ))
++				return false;
++			continue;
++		}
++
++		if( cmd == 6 )
++		{
++			if( !CL_GoldSrcSkip( 84 ))
++				return false;
++			continue;
++		}
++
++		if( cmd == 7 )
++		{
++			if( !CL_GoldSrcSkip( 8 ))
++				return false;
++			continue;
++		}
++
++		if( cmd == 8 )
++		{
++			int channel, sample_size;
++
++			if( !CL_GoldSrcRead( &channel, sizeof( channel ))
++				|| !CL_GoldSrcRead( &sample_size, sizeof( sample_size ))
++				|| sample_size < 0 || sample_size > INT_MAX - 16
++				|| !CL_GoldSrcSkip( sample_size + 16 ))
++			{
++				CL_DemoCompleted();
++				return false;
++			}
++			continue;
++		}
++
++		if( cmd == 9 )
++		{
++			int payload;
++
++			if( !CL_GoldSrcRead( &payload, sizeof( payload )) || payload < 0 || !CL_GoldSrcSkip( payload ))
++			{
++				CL_DemoCompleted();
++				return false;
++			}
++			continue;
++		}
++
++		if( cmd != 0 && cmd != 1 )
++		{
++			Con_Printf( S_ERROR "HLDEMO: unknown command %d\n", cmd );
++			CL_DemoCompleted();
++			return false;
++		}
++
++		elapsed = CL_GetDemoPlaybackClock() - demo.starttime;
++		if( !cls.timedemo && demo.framecount != 0 && time > elapsed )
++		{
++			FS_Seek( cls.demofile, command_pos, SEEK_SET );
++			return false;
++		}
++
++		// Restore the receiving-side channel, as HLTV DemoFile::ReadSequenceInfo does.
++		// The recording proxy's outgoing sequence becomes the playback incoming sequence.
++		if( !CL_GoldSrcSkip( HLDEMO_INFO_SIZE )
++			|| !CL_GoldSrcRead( &cls.netchan.incoming_sequence, sizeof( int ))
++			|| !CL_GoldSrcRead( &cls.netchan.incoming_acknowledged, sizeof( int ))
++			|| !CL_GoldSrcRead( &cls.netchan.incoming_reliable_acknowledged, sizeof( int ))
++			|| !CL_GoldSrcRead( &cls.netchan.incoming_reliable_sequence, sizeof( int ))
++			|| !CL_GoldSrcRead( &cls.netchan.outgoing_sequence, sizeof( int ))
++			|| !CL_GoldSrcRead( &cls.netchan.reliable_sequence, sizeof( int ))
++			|| !CL_GoldSrcRead( &cls.netchan.last_reliable_sequence, sizeof( int ))
++			|| !CL_GoldSrcRead( &message_length, sizeof( message_length )))
++		{
++			CL_DemoCompleted();
++			return false;
++		}
++
++		if( message_length < 0 || message_length > MAX_INIT_MSG )
++		{
++			Con_Printf( S_ERROR "HLDEMO: bad message length %d\n", message_length );
++			CL_DemoCompleted();
++			return false;
++		}
++
++		if( message_length > 0 && !CL_GoldSrcRead( buffer, message_length ))
++		{
++			CL_DemoCompleted();
++			return false;
++		}
++
++		*length = message_length;
++		demo.timestamp = time;
++		demo.framecount++;
++
++		if( demo.framecount == 1 )
++			Con_Printf( "HLDEMO: first network message %d bytes at %.3f\n", message_length, time );
++
++		return message_length > 0;
++	}
++
++	return false;
++}
++
+ /*
+ ====================
+ CL_PlayDemo_f
+@@ -1560,6 +1868,13 @@ void CL_PlayDemo_f( void )
+ 	FS_Seek( cls.demofile, 0, SEEK_SET ); // rewind back to start
+ 	cls.forcetrack = 0;
+ 
++	if( ident == (('E'<<24)+('D'<<16)+('L'<<8)+'H') )
++	{
++		if( !CL_OpenGoldSrcDemo( ))
++			CL_DemoAborted();
++		return;
++	}
++
+ 	// check for quake demos
+ 	if( ident != IDEMOHEADER )
+ 	{
+diff --git a/engine/client/cl_main.c b/engine/client/cl_main.c
+index 9c175bf..37e2e7f 100644
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -2714,8 +2714,9 @@ static void CL_ReadNetMessage( void )
+ 	// build list of all solid entities per next frame (exclude clients)
+ 	CL_SetSolidEntities();
+ 
+-	// check for fragmentation/reassembly related packets.
+-	if( cls.state != ca_disconnected && Netchan_IncomingReady( &cls.netchan ))
++	// HLDEMO frames are already complete payloads. Netchan fragment
++	// reassembly shares net_message and must not run during playback.
++	if( cls.demoplayback != DEMO_HLDEMO && cls.state != ca_disconnected && Netchan_IncomingReady( &cls.netchan ))
+ 	{
+ 		// process the incoming buffer(s)
+ 		if( Netchan_CopyNormalFragments( &cls.netchan, &net_message, &curSize ))
+@@ -3173,7 +3174,7 @@ qboolean CL_PrecacheResources( void )
+ 			{
+ 				Con_Printf( S_ERROR "submodel %s not found\n", pRes->szFileName );
+ 
+-				if( FBitSet( pRes->ucFlags, RES_FATALIFMISSING ))
++				if( FBitSet( pRes->ucFlags, RES_FATALIFMISSING ) && !cls.demoplayback )
+ 				{
+ 					CL_Disconnect_f();
+ 					return false;
+@@ -3209,7 +3210,7 @@ qboolean CL_PrecacheResources( void )
+ 
+ 					if( !cl.sound_index[pRes->nIndex] )
+ 					{
+-						if( FBitSet( pRes->ucFlags, RES_FATALIFMISSING ))
++						if( FBitSet( pRes->ucFlags, RES_FATALIFMISSING ) && !cls.demoplayback )
+ 						{
+ 							S_EndRegistration();
+ 							CL_Disconnect_f();
+@@ -3238,7 +3239,7 @@ qboolean CL_PrecacheResources( void )
+ 
+ 						if( cl.models[pRes->nIndex] == NULL )
+ 						{
+-							if( FBitSet( pRes->ucFlags, RES_FATALIFMISSING ))
++							if( FBitSet( pRes->ucFlags, RES_FATALIFMISSING ) && !cls.demoplayback )
+ 							{
+ 								S_EndRegistration();
+ 								CL_Disconnect_f();
+diff --git a/engine/client/cl_parse.c b/engine/client/cl_parse.c
+index ac31fb2..0d2ba08 100644
+--- a/engine/client/cl_parse.c
++++ b/engine/client/cl_parse.c
+@@ -1866,7 +1866,8 @@ void CL_RegisterResources( sizebuf_t *msg, connprotocol_t proto )
+ 	else
+ 	{
+ 		Con_Printf( S_ERROR "client world model is NULL\n" );
+-		CL_Disconnect();
++		if( !cls.demoplayback )
++			CL_Disconnect();
+ 	}
+ }
+ 
+diff --git a/engine/ref_api.h b/engine/ref_api.h
+index 4c6610d..d9e0fba 100644
+--- a/engine/ref_api.h
++++ b/engine/ref_api.h
+@@ -101,7 +101,8 @@ typedef enum
+ {
+ 	DEMO_INACTIVE = 0,
+ 	DEMO_XASH3D,
+-	DEMO_QUAKE1
++	DEMO_QUAKE1,
++	DEMO_HLDEMO
+ } demo_mode;
+ 
+ typedef enum ref_window_type_e

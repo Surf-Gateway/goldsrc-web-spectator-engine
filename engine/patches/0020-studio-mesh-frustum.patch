@@ -1,0 +1,175 @@
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -14,6 +14,9 @@
+ */
+ 
+ #include "gl_local.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include "xash3d_mathlib.h"
+ #include "const.h"
+ #include "r_studioint.h"
+@@ -2232,6 +2235,115 @@
+ 
+ ===============
+ */
++
++// Test the actual emitted world vertices, before any GL state or texture bind.
++// Unsupported profiles/ranges retain the native path. No source lifetime change.
++static struct { double checked, culled, passed, unsupported, vertexRefs; } sg_mesh_cull;
++void SGStudioMeshCullReport( void )
++{
++#ifdef __EMSCRIPTEN__
++    if( !r_studio_mesh_cull.value ) return;
++    EM_ASM({
++        const s = Module["sgStudioMeshCull"] ??= {};
++        s.checked=$0; s.culled=$1; s.passed=$2; s.unsupported=$3; s.vertexRefs=$4;
++    }, sg_mesh_cull.checked,sg_mesh_cull.culled,sg_mesh_cull.passed,sg_mesh_cull.unsupported,sg_mesh_cull.vertexRefs);
++#endif
++}
++static unsigned int SGStudioVertexClipMask( const float *v )
++{
++    unsigned int mask = 0;
++    int i;
++    for( i = 0; i < FRUSTUM_PLANES; i++ )
++    {
++        const mplane_t *plane = &RI.frustum.planes[i];
++        float margin;
++        if( !(RI.frustum.clipFlags & (1u << i)) ) continue;
++        margin = 0.125f * (fabs(plane->normal[0])+fabs(plane->normal[1])+fabs(plane->normal[2]));
++        if( DotProduct( plane->normal, v ) < plane->dist - margin ) mask |= 1u << i;
++    }
++    return mask;
++}
++static qboolean SGStudioMeshOutside( const mstudiomesh_t *mesh, float shellscale )
++{
++    const studiohdr_t *hdr = m_pStudioHeader;
++    const byte *base = (const byte *)hdr;
++    const short *cmd;
++    const mstudioseqdesc_t *seq;
++    size_t offset, remaining, refs = 0;
++    vec3_t mins, maxs;
++    int count, i, axis;
++    qboolean haveVertex = false;
++    if( !r_studio_mesh_cull.value ) return false;
++    sg_mesh_cull.checked++;
++    if( r_nocull.value || !RP_NORMALPASS() || !RI.drawWorld || RI.currententity == tr.viewent ||
++        RI.currententity->curstate.rendermode != kRenderNormal ||
++        RI.currententity->curstate.renderfx != kRenderFxNone || shellscale != 0.0f ||
++        (g_nFaceFlags & (STUDIO_NF_CHROME|STUDIO_NF_ADDITIVE)) ||
++        !hdr || hdr->flags || hdr->numbones != 1 || hdr->numbonecontrollers ||
++        hdr->numseq != 1 || hdr->numseqgroups != 1 || hdr->length < (int)sizeof(*hdr) || hdr->length > 64*1024*1024 ||
++        hdr->seqindex < (int)sizeof(*hdr) || (hdr->seqindex & 3) || hdr->seqindex > hdr->length ||
++        sizeof(*seq) > (size_t)hdr->length - hdr->seqindex ||
++        m_pSubModel->numverts < 1 || m_pSubModel->numverts > MAXSTUDIOVERTS ||
++        mesh->triindex < (int)sizeof(*hdr) || (mesh->triindex & 1) || mesh->triindex >= hdr->length ) goto unsupported;
++    seq = (const mstudioseqdesc_t *)(base + hdr->seqindex);
++    if( seq->numframes != 1 || seq->numblends != 1 ) goto unsupported;
++    offset = mesh->triindex;
++    ClearBounds( mins, maxs );
++    for( ;; )
++    {
++        remaining = (size_t)hdr->length - offset;
++        if( remaining < sizeof(short) ) goto unsupported;
++        cmd = (const short *)(base + offset);
++        count = *cmd++; offset += sizeof(short);
++        if( count == 0 ) break;
++        if( count < 0 ) count = -count;
++        if( count < 3 || (size_t)count > ((size_t)hdr->length - offset) / (4*sizeof(short)) ||
++            refs + count > 1024u*1024u ) goto unsupported;
++        for( i = 0; i < count; i++, cmd += 4 )
++        {
++            int index = cmd[0];
++            const float *v;
++            if( index < 0 || index >= m_pSubModel->numverts ) goto unsupported;
++            v = g_studio.verts[index];
++            for( axis = 0; axis < 3; axis++ )
++                if( !isfinite(v[axis]) || fabs(v[axis]) > 1048576.0f ) goto unsupported;
++            AddPointToBounds( v, mins, maxs );
++        }
++        haveVertex = true; refs += count; offset += count * 4 * sizeof(short);
++    }
++    if( !haveVertex ) goto unsupported;
++    sg_mesh_cull.vertexRefs += refs;
++    // Retain geometry on planes despite renderer/driver float rounding.
++    for( axis = 0; axis < 3; axis++ ) { mins[axis] -= 0.125f; maxs[axis] += 0.125f; }
++    if( R_CullBox( mins, maxs )) { sg_mesh_cull.culled++; return true; }
++    // A large union box can intersect the view although its separated triangles
++    // cannot. Keep the complete original draw if any triangle might survive.
++    offset = mesh->triindex;
++    for( ;; )
++    {
++        qboolean fan;
++        unsigned int a, b, c;
++        cmd = (const short *)(base + offset);
++        count = *cmd++; offset += sizeof(short);
++        if( !count ) break;
++        fan = count < 0;
++        if( fan ) count = -count;
++        a = SGStudioVertexClipMask( g_studio.verts[cmd[0]] );
++        b = SGStudioVertexClipMask( g_studio.verts[cmd[4]] );
++        for( i = 2; i < count; i++ )
++        {
++            c = SGStudioVertexClipMask( g_studio.verts[cmd[i*4]] );
++            if( !(a & b & c) ) { sg_mesh_cull.passed++; return false; }
++            if( !fan ) a = b;
++            b = c;
++        }
++        offset += count * 4 * sizeof(short);
++    }
++    sg_mesh_cull.culled++; return true;
++unsupported:
++    sg_mesh_cull.unsupported++; return false;
++}
++
+ static void R_StudioDrawPoints( void )
+ {
+ 	int		i, j, k, m_skinnum;
+@@ -2369,6 +2481,7 @@
+ 		ptricmds = (short *)((byte *)m_pStudioHeader + pmesh->triindex);
+ 
+ 		g_nFaceFlags = ptexture[pskinref[pmesh->skinref]].flags | g_nForceFaceFlags;
++		if( SGStudioMeshOutside( pmesh, shellscale )) continue;
+ 
+ 		s = 1.0f / (float)ptexture[pskinref[pmesh->skinref]].width;
+ 		t = 1.0f / (float)ptexture[pskinref[pmesh->skinref]].height;
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -810,6 +810,8 @@
+ extern convar_t	r_traceglow;
+ extern convar_t	r_static_lightmap_batch;
+ extern convar_t	r_studio_texture_defer;
++extern convar_t	r_studio_mesh_cull;
++void SGStudioMeshCullReport( void );
+ extern convar_t	r_vbo;
+ extern convar_t	r_vbo_dlightmode;
+ extern convar_t	r_vbo_detail;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -32,6 +32,7 @@
+ CVAR_DEFINE_AUTO( gl_round_down, "2", FCVAR_GLCONFIG|FCVAR_READ_ONLY, "round texture sizes to nearest POT value" );
+ CVAR_DEFINE_AUTO( r_static_lightmap_batch, "0", FCVAR_GLCONFIG, "batch static lightmap triangles (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_texture_defer, "0", FCVAR_GLCONFIG, "defer eligible MDL texture uploads until first use (experimental)" );
++CVAR_DEFINE_AUTO( r_studio_mesh_cull, "0", FCVAR_GLCONFIG, "cull off-screen classic static studio meshes (experimental)" );
+ CVAR_DEFINE( r_vbo, "gl_vbo", "0", FCVAR_GLCONFIG, "draw world using VBO (known to be glitchy)" );
+ CVAR_DEFINE( r_vbo_detail, "gl_vbo_detail", "0", FCVAR_GLCONFIG, "detail vbo mode (0: disable, 1: multipass, 2: singlepass, broken decal dlights)" );
+ CVAR_DEFINE( r_vbo_dlightmode, "gl_vbo_dlightmode", "1", FCVAR_GLCONFIG, "vbo dlight rendering mode (0-1)" );
+@@ -1149,6 +1150,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_shadows );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_static_lightmap_batch );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_texture_defer );
++	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_cull );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_dlightmode );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_overbrightmode );
+--- a/ref/gl/gl_rmain.c
++++ b/ref/gl/gl_rmain.c
+@@ -1152,6 +1152,7 @@
+ 
+ 	tr.realframecount++; // right called after viewmodel events
+ 	R_RenderScene();
++	SGStudioMeshCullReport();
+ 
+ 	return;
+ }

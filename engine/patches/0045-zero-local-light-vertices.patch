@@ -1,0 +1,77 @@
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -2618,6 +2618,21 @@
+ #endif
+ }
+ 
++
++#ifdef __EMSCRIPTEN__
++static __attribute__((noinline)) void SGStudioOriginalVertexSetup( void )
++{
++    int i;
++    byte *pvertbone = ((byte *)m_pStudioHeader + m_pSubModel->vertinfoindex);
++    vec3_t *pstudioverts = (vec3_t *)((byte *)m_pStudioHeader + m_pSubModel->vertindex);
++		for( i = 0; i < m_pSubModel->numverts; i++ )
++		{
++			Matrix3x4_VectorTransform( g_studio.bonestransform[pvertbone[i]], pstudioverts[i], g_studio.verts[i] );
++			R_LightStrength( pvertbone[i], pstudioverts[i], g_studio.lightpos[i] );
++		}
++}
++#endif
++
+ static void R_StudioDrawPoints( void )
+ {
+ 	int		i, j, k, m_skinnum;
+@@ -2674,11 +2689,24 @@
+ 	}
+ 	else
+ 	{
++#ifdef __EMSCRIPTEN__
++        if(r_studio_zero_local_light.value && g_studio.numlocallights==0)
++        {
++            for(i=0;i<m_pSubModel->numverts;i++)
++            {
++                Matrix3x4_VectorTransform(g_studio.bonestransform[pvertbone[i]],pstudioverts[i],g_studio.verts[i]);
++                g_studio.lightage[pvertbone[i]]=g_studio.framecount;
++            }
++        }
++        else
++            SGStudioOriginalVertexSetup();
++#else
+ 		for( i = 0; i < m_pSubModel->numverts; i++ )
+ 		{
+ 			Matrix3x4_VectorTransform( g_studio.bonestransform[pvertbone[i]], pstudioverts[i], g_studio.verts[i] );
+ 			R_LightStrength( pvertbone[i], pstudioverts[i], g_studio.lightpos[i] );
+ 		}
++#endif
+ 	}
+ 
+ 	// generate shared normals for properly scaling glowing shell
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -43,6 +43,7 @@
+ CVAR_DEFINE_AUTO( r_studio_clip_cache, "0", FCVAR_GLCONFIG, "reuse exact clip masks within one submodel draw (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_client_states, "0", FCVAR_GLCONFIG, "hold studio vertex/color client state per submodel (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_constant_light, "0", FCVAR_GLCONFIG, "reuse original constant studio lighting per mesh" );
++CVAR_DEFINE_AUTO( r_studio_zero_local_light, "0", FCVAR_GLCONFIG, "exact zero-local-light studio vertex setup" );
+ #ifdef __EMSCRIPTEN__
+ CVAR_DEFINE_AUTO( r_mip_rgba_pairs, "0", FCVAR_GLCONFIG, "exact packed RGBA mip reduction (candidate)" );
+ #endif
+@@ -1182,6 +1183,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_clip_cache );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_client_states );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_constant_light );
++    gEngfuncs.Cvar_RegisterVariable( &r_studio_zero_local_light );
+ #ifdef __EMSCRIPTEN__
+     gEngfuncs.Cvar_RegisterVariable( &r_mip_rgba_pairs );
+ #endif
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -825,6 +825,7 @@
+ extern convar_t	r_studio_clip_cache;
+ extern convar_t r_studio_client_states;
+ extern convar_t r_studio_constant_light;
++extern convar_t r_studio_zero_local_light;
+ #ifdef __EMSCRIPTEN__
+ extern convar_t r_mip_rgba_pairs;
+ #endif

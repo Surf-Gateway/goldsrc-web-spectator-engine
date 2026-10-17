@@ -1,0 +1,255 @@
+--- a/engine/common/mod_studio.c
++++ b/engine/common/mod_studio.c
+@@ -19,6 +19,9 @@
+ #include "r_studioint.h"
+ #include "library.h"
+ #include "ref_common.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ 
+ typedef int (*STUDIOAPI)( int, sv_blending_interface_t**, server_studio_api_t*,  float (*transform)[3][4], float (*bones)[MAXSTUDIOBONES][3][4] );
+ 
+@@ -828,6 +831,163 @@
+ 	return (studiohdr_t *)buffer;
+ }
+ 
++// Conservative classic static-prop profile. Zero means retain the whole cache.
++// This qualifies omission of pixels, not general malformed-MDL acceptance.
++static qboolean SGStudioRange( size_t limit, int offset, int count, size_t stride )
++{
++    if( offset < 0 || count < 0 || (size_t)offset > limit ) return false;
++    if( !count ) return true;
++    return offset >= sizeof( studiohdr_t ) && (size_t)count <= (limit - offset) / stride;
++}
++
++static size_t SGStudioTexturePrefix( const void *buffer, size_t bytes, qboolean keepTrace )
++{
++    const byte *data = buffer;
++    const studiohdr_t *h = buffer;
++    const mstudiotexture_t *textures;
++    const mstudiobone_t *bones;
++    const mstudioseqdesc_t *seq;
++    const mstudiobodyparts_t *body;
++    size_t cut, work = 0;
++    int i, j, k;
++    if( bytes < sizeof(*h) || bytes > 64u * 1024u * 1024u ||
++        h->ident != IDSTUDIOHEADER || h->version != STUDIO_VERSION || h->length != bytes ||
++        h->flags || h->studiohdr2index || h->unused || h->unused2 || h->unused3 ||
++        h->numtextures < 1 || h->numtextures > MAXSTUDIOSKINS ||
++        h->texturedataindex < sizeof(*h) || h->texturedataindex >= bytes ||
++        h->numbones < 1 || h->numbones > MAXSTUDIOBONES || h->numbonecontrollers ||
++        h->numseq != 1 || h->numseqgroups != 1 ||
++        h->numskinref < 1 || h->numskinref > MAXSTUDIOSKINS ||
++        h->numskinfamilies < 1 || h->numskinfamilies > 256 ||
++        h->numbodyparts < 1 || h->numbodyparts > MAXSTUDIOBODYPARTS ||
++        h->numhitboxes < 0 || h->numhitboxes > MAXSTUDIOBONES ||
++        h->numattachments < 0 || h->numattachments > MAXSTUDIOATTACHMENTS ||
++        h->numtransitions < 0 || h->numtransitions > 256 ) return 0;
++    cut = h->texturedataindex;
++#define SG_TABLE(field,count,type) \
++    if( (h->field & 3) || !SGStudioRange(cut,h->field,h->count,sizeof(type)) ) return 0
++    SG_TABLE(textureindex,numtextures,mstudiotexture_t);
++    SG_TABLE(boneindex,numbones,mstudiobone_t);
++    SG_TABLE(seqindex,numseq,mstudioseqdesc_t);
++    SG_TABLE(seqgroupindex,numseqgroups,mstudioseqgroup_t);
++    SG_TABLE(bodypartindex,numbodyparts,mstudiobodyparts_t);
++    SG_TABLE(hitboxindex,numhitboxes,mstudiobbox_t);
++    SG_TABLE(attachmentindex,numattachments,mstudioattachment_t);
++#undef SG_TABLE
++    if( (h->skinindex & 1) || !SGStudioRange(cut,h->skinindex,h->numskinref*h->numskinfamilies,sizeof(short)) ||
++        !SGStudioRange(cut,h->transitionindex,h->numtransitions*h->numtransitions,1) ) return 0;
++    textures = (const mstudiotexture_t *)(data + h->textureindex);
++    for( i = 0; i < h->numtextures; i++ )
++    {
++        const mstudiotexture_t *t = &textures[i];
++        if( t->width < 1 || t->height < 1 || t->width > 16384 || t->height > 16384 ||
++            t->index < cut || !SGStudioRange(bytes,t->index,t->width*t->height+768,1) ||
++            (t->flags & ~0x7fu) || (keepTrace && (t->flags & STUDIO_NF_MASKED)) ||
++            !Q_strnicmp(t->name,"DM_Base",7) || !Q_strnicmp(t->name,"remap",5) ) return 0;
++    }
++    for( i = 0; i < h->numskinref*h->numskinfamilies; i++ )
++    {
++        int skin = ((const short *)(data+h->skinindex))[i];
++        if( skin < 0 || skin >= h->numtextures ) return 0;
++    }
++    bones = (const mstudiobone_t *)(data+h->boneindex);
++    for( i = 0; i < h->numbones; i++ )
++    {
++        if( bones[i].unused || bones[i].parent < -1 || bones[i].parent >= i ) return 0;
++        for( j = 0; j < 6; j++ ) if( bones[i].bonecontroller[j] != -1 ) return 0;
++    }
++    for( i = 0; i < h->numhitboxes; i++ )
++    {
++        const mstudiobbox_t *b = (const mstudiobbox_t *)(data+h->hitboxindex)+i;
++        if( b->bone < 0 || b->bone >= h->numbones ) return 0;
++    }
++    for( i = 0; i < h->numattachments; i++ )
++    {
++        const mstudioattachment_t *b = (const mstudioattachment_t *)(data+h->attachmentindex)+i;
++        if( b->flags || b->bone < 0 || b->bone >= h->numbones ) return 0;
++    }
++    seq = (const mstudioseqdesc_t *)(data+h->seqindex);
++    if( seq->numframes != 1 || seq->numblends != 1 || seq->seqgroup ||
++        seq->numevents || !SGStudioRange(cut,seq->eventindex,0,1) || seq->weightlistindex ||
++        !SGStudioRange(cut,seq->iklockindex,0,1) ||
++        seq->autolayerindex || seq->keyvalueindex || seq->animdescindex ||
++        seq->numautolayers || seq->numiklocks || seq->groupsize[0] || seq->groupsize[1] ||
++        (seq->animindex & 3) || !SGStudioRange(cut,seq->animindex,h->numbones,sizeof(mstudioanim_t)) ) return 0;
++    // No animation streams: all transforms come from the retained bone values.
++    for( i = 0; i < h->numbones; i++ )
++    {
++        const mstudioanim_t *a = (const mstudioanim_t *)(data+seq->animindex)+i;
++        for( j = 0; j < 6; j++ ) if( a->offset[j] ) return 0;
++    }
++    body = (const mstudiobodyparts_t *)(data+h->bodypartindex);
++    for( i = 0; i < h->numbodyparts; i++ )
++    {
++        const mstudiobodyparts_t *b = &body[i];
++        if( b->base < 1 || b->nummodels < 1 || b->nummodels > MAXSTUDIOMODELS ||
++            (b->modelindex & 3) || !SGStudioRange(cut,b->modelindex,b->nummodels,sizeof(mstudiomodel_t)) ) return 0;
++        for( j = 0; j < b->nummodels; j++ )
++        {
++            const mstudiomodel_t *m = (const mstudiomodel_t *)(data+b->modelindex)+j;
++            const mstudiomesh_t *meshes;
++            int normalCount = 0;
++            if( m->blendvertinfoindex || m->blendnorminfoindex || m->unused ||
++                m->nummesh < 0 || m->nummesh > MAXSTUDIOMESHES ||
++                m->numverts < 0 || m->numverts > MAXSTUDIOVERTS ||
++                m->numnorms < 0 || m->numnorms > MAXSTUDIOVERTS ||
++                (m->meshindex & 3) || !SGStudioRange(cut,m->meshindex,m->nummesh,sizeof(mstudiomesh_t)) ||
++                (m->vertindex & 3) || !SGStudioRange(cut,m->vertindex,m->numverts,sizeof(vec3_t)) ||
++                (m->normindex & 3) || !SGStudioRange(cut,m->normindex,m->numnorms,sizeof(vec3_t)) ||
++                !SGStudioRange(cut,m->vertinfoindex,m->numverts,1) ||
++                !SGStudioRange(cut,m->norminfoindex,m->numnorms,1) ) return 0;
++            work += m->numverts + m->numnorms;
++            if( work > 1048576 ) return 0;
++            for( k = 0; k < m->numverts; k++ ) if( data[m->vertinfoindex+k] >= h->numbones ) return 0;
++            for( k = 0; k < m->numnorms; k++ ) if( data[m->norminfoindex+k] >= h->numbones ) return 0;
++            meshes = (const mstudiomesh_t *)(data+m->meshindex);
++            for( k = 0; k < m->nummesh; k++ )
++            {
++                const mstudiomesh_t *mesh = &meshes[k];
++                size_t at;
++                int triangles = 0;
++                if( mesh->skinref < 0 || mesh->skinref >= h->numskinref || mesh->numnorms < 0 ||
++                    mesh->numnorms > m->numnorms-normalCount || mesh->numtris < 0 ||
++                    mesh->numtris > 1048576 || (mesh->triindex & 1) ||
++                    !SGStudioRange(cut,mesh->triindex,1,sizeof(short)) ) return 0;
++                normalCount += mesh->numnorms; at = mesh->triindex;
++                for(;;)
++                {
++                    int n, v;
++                    if( at > cut-sizeof(short) || ++work > 1048576 ) return 0;
++                    n = *(const short *)(data+at); at += sizeof(short);
++                    if( !n ) break;
++                    if( n < 0 ) n = -n;
++                    if( n < 3 || n > MAXSTUDIOVERTS || (size_t)n > (cut-at)/(4*sizeof(short)) ) return 0;
++                    work += n; if( work > 1048576 ) return 0;
++                    for( v = 0; v < n; v++ )
++                    {
++                        const short *vertex = (const short *)(data+at+v*4*sizeof(short));
++                        if( vertex[0] < 0 || vertex[0] >= m->numverts || vertex[1] < 0 || vertex[1] >= m->numnorms ) return 0;
++                    }
++                    at += n*4*sizeof(short); triangles += n-2;
++                }
++                if( triangles != mesh->numtris ) return 0;
++            }
++        }
++    }
++    return cut;
++}
++
++static void SGStudioCacheReport( size_t fullCache, size_t cache, qboolean trimmed )
++{
++#ifdef __EMSCRIPTEN__
++    EM_ASM({
++        const s = Module["sgStudioCache"] ??= {};
++        s.models=(s.models||0)+1; s.fullCacheBytes=(s.fullCacheBytes||0)+$0; s.cacheBytes=(s.cacheBytes||0)+$1;
++        s.trimmedModels=(s.trimmedModels||0)+$2; s.removedBytes=(s.removedBytes||0)+$0-$1;
++    }, (double)fullCache, (double)cache, trimmed);
++#endif
++}
++
+ static studiohdr_t *Mod_MaybeTruncateStudioTextureData( model_t *mod )
+ {
+ #if XASH_LOW_MEMORY
+@@ -849,11 +1009,13 @@
+ Mod_LoadStudioModel
+ =================
+ */
+-void Mod_LoadStudioModel( model_t *mod, const void *buffer, qboolean *loaded )
++void Mod_LoadStudioModel( model_t *mod, const void *buffer, qboolean *loaded, size_t bufferSize )
+ {
+ 	char poolname[MAX_VA_STRING];
+ 	studiohdr_t	*phdr;
+ 	qboolean textures_loaded = false;
++	size_t texturePrefix = 0, fullCacheSize;
++	qboolean trimRequested = !Host_IsDedicated() && Cvar_VariableValue("sg_studio_cache_trim") && Cvar_VariableValue("r_studio_texture_defer");
+ 
+ 	Q_snprintf( poolname, sizeof( poolname ), "^2%s^7", mod->name );
+ 
+@@ -864,6 +1026,7 @@
+ 	phdr = R_StudioLoadHeader( mod, buffer );
+ 	if( !phdr || phdr->length < sizeof( studiohdr_t )) // garbage value in length
+ 		return;	// bad model
++	if( trimRequested ) texturePrefix = SGStudioTexturePrefix(buffer,bufferSize,FBitSet(host.features,ENGINE_IMPROVED_LINETRACE));
+ 
+ #if !XASH_DEDICATED
+ 	if( !Host_IsDedicated( ) && phdr->numtextures == 0 )
+@@ -920,6 +1083,17 @@
+ #endif
+ 	}
+ 
++    // Renderer image ownership is established. Only validated classic static
++    // embedded layouts may omit pixels; merged T.mdl and other profiles stay full.
++    fullCacheSize = phdr->length;
++    if( texturePrefix && !textures_loaded )
++    {
++        mod->cache.data = Mem_Realloc(mod->mempool,mod->cache.data,texturePrefix);
++        phdr = mod->cache.data;
++        phdr->length = texturePrefix;
++    }
++    if( trimRequested ) SGStudioCacheReport(fullCacheSize,phdr->length,texturePrefix != 0 && !textures_loaded);
++
+ 	// NOTE: we may not want to keep raw textures in memory. just cutoff model pointer above texture base
+ 	phdr = Mod_MaybeTruncateStudioTextureData( mod );
+ 
+--- a/engine/common/model.c
++++ b/engine/common/model.c
+@@ -30,6 +30,7 @@
+ poolhandle_t      com_studiocache;		// cache for submodels
+ CVAR_DEFINE( mod_studiocache, "r_studiocache", "1", FCVAR_ARCHIVE, "enables studio cache for speedup tracing hitboxes" );
+ CVAR_DEFINE_AUTO( r_wadtextures, "0", 0, "completely ignore textures in the bsp-file if enabled" );
++CVAR_DEFINE_AUTO( sg_studio_cache_trim, "0", 0, "trim validated static MDL texture tails (experimental)" );
+ CVAR_DEFINE_AUTO( r_showhull, "0", 0, "draw collision hulls 1-3" );
+ 
+ /*
+@@ -142,6 +143,7 @@
+ 	Cvar_RegisterVariable( &mod_studiocache );
+ 	Cvar_RegisterVariable( &r_wadtextures );
+ 	Cvar_RegisterVariable( &r_showhull );
++	Cvar_RegisterVariable( &sg_studio_cache_trim );
+ 
+ 	Cmd_AddCommand( "mapstats", Mod_PrintWorldStats_f, "show stats for currently loaded map" );
+ 	Cmd_AddCommand( "modellist", Mod_Modellist_f, "display loaded models list" );
+@@ -297,7 +299,7 @@
+ 	switch( *(uint *)buf )
+ 	{
+ 	case IDSTUDIOHEADER:
+-		Mod_LoadStudioModel( mod, buf, &loaded );
++		Mod_LoadStudioModel( mod, buf, &loaded, (size_t)length );
+ 		break;
+ 	case IDSPRITEHEADER:
+ 		Mod_LoadSpriteModel( mod, buf, &loaded );
+--- a/engine/common/mod_local.h
++++ b/engine/common/mod_local.h
+@@ -190,7 +190,7 @@
+ //
+ // mod_studio.c
+ //
+-void Mod_LoadStudioModel( model_t *mod, const void *buffer, qboolean *loaded );
++void Mod_LoadStudioModel( model_t *mod, const void *buffer, qboolean *loaded, size_t bufferSize );
+ void Mod_UnloadStudioModel( model_t *mod );
+ void Mod_InitStudioAPI( void );
+ void Mod_InitStudioHull( void );

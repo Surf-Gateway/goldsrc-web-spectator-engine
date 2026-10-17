@@ -1,0 +1,199 @@
+--- a/ref/gl/gl_image.c
++++ b/ref/gl/gl_image.c
+@@ -154,6 +154,114 @@
+     tex->studio_shared_blob=entry;sg_studio_share.blobs++;sg_studio_share.owners++;sg_studio_share.uniqueBytes+=bytes;
+     sg_studio_share.peakUniqueBytes=Q_max(sg_studio_share.peakUniqueBytes,sg_studio_share.uniqueBytes);
+ }
++/* Candidate: reuse immutable encoded CPU bytes only after exact raw verification. */
++#define SG_REUSE_RAW_LIMIT (4u*1024u*1024u)
++static struct { unsigned int key,next; qboolean valid; } sgReuseRecords[MAX_TEXTURES];
++static unsigned int sgReuseHeads[MAX_TEXTURES];
++static struct {
++    unsigned int calls,hits,misses,refusals,decodeFailures,collisions,records,peakRecords;
++    size_t comparedBytes,maxScratchBytes;
++    double proofMs;
++} sgReuseStats;
++static unsigned int SGReuseRawKey( const byte *buffer, size_t bytes )
++{
++    unsigned int key=0,block,i;
++    for(block=0;block<8;block++)
++    {
++        size_t offset=(bytes-8u)*block/7u;
++        for(i=0;i<8;i++)key=(key*16777619u)^buffer[offset+i];
++    }
++    return key;
++}
++static void SGReuseForget( unsigned int entry )
++{
++    unsigned int *link,visited=0;
++    if(!entry||entry>MAX_TEXTURES||!sgReuseRecords[entry-1].valid)return;
++    link=&sgReuseHeads[sgReuseRecords[entry-1].key%MAX_TEXTURES];
++    while(*link&&*link!=entry&&visited++<MAX_TEXTURES)
++    {if(*link>MAX_TEXTURES){gEngfuncs.Host_Error("Invalid raw-source candidate link\n");return;}link=&sgReuseRecords[*link-1].next;}
++    if(*link!=entry){gEngfuncs.Host_Error("Raw-source candidate registry mismatch\n");return;}
++    *link=sgReuseRecords[entry-1].next;memset(&sgReuseRecords[entry-1],0,sizeof(sgReuseRecords[0]));sgReuseStats.records--;
++}
++static void SGReuseRemember( const gl_texture_t *tex, unsigned int key )
++{
++    unsigned int entry=tex->studio_shared_blob;
++    const struct sg_studio_blob_s *record;
++    if(!entry||entry>MAX_TEXTURES)return;
++    record=&sg_studio_blobs[entry-1];
++    if(!tex->studio_pending||!record->refs||record->buffer!=tex->studio_pending->buffer||
++        record->bytes!=tex->studio_codec_bytes||record->rawBytes!=tex->studio_pending->size)
++    {sgReuseStats.refusals++;return;}
++    if(sgReuseRecords[entry-1].valid)
++    {if(sgReuseRecords[entry-1].key!=key)sgReuseStats.refusals++;return;}
++    sgReuseRecords[entry-1].valid=true;sgReuseRecords[entry-1].key=key;
++    sgReuseRecords[entry-1].next=sgReuseHeads[key%MAX_TEXTURES];sgReuseHeads[key%MAX_TEXTURES]=entry;
++    sgReuseStats.records++;sgReuseStats.peakRecords=Q_max(sgReuseStats.peakRecords,sgReuseStats.records);
++}
++static qboolean SGReuseEncodedSource( gl_texture_t *tex, unsigned int key )
++{
++    rgbdata_t *pic=tex->studio_pending;
++    unsigned int entry,visited=0,matched=0;
++    size_t span=0,raw=pic->size;
++    double started=gEngfuncs.pfnTime();
++    struct sg_studio_blob_s *record;
++    sgReuseStats.calls++;
++    if(!r_studio_encode_reuse.value||!r_studio_source_share.value||tex->studio_shared_blob||tex->studio_codec_bytes||
++        tex->studio_codec_scratch||!pic->buffer||raw<4096||raw>SG_REUSE_RAW_LIMIT)
++    {sgReuseStats.refusals++;sgReuseStats.misses++;sgReuseStats.proofMs+=(gEngfuncs.pfnTime()-started)*1000;return false;}
++    for(entry=sgReuseHeads[key%MAX_TEXTURES];entry;entry=sgReuseRecords[entry-1].next)
++    {
++        mz_ulong restored;
++        int result;
++        if(entry>MAX_TEXTURES||++visited>SG_STUDIO_BLOB_CANDIDATES){sgReuseStats.refusals++;break;}
++        record=&sg_studio_blobs[entry-1];
++        if(!sgReuseRecords[entry-1].valid||!record->refs||!record->buffer||record->bytes<16||record->bytes+64u>=record->rawBytes)
++        {sgReuseStats.refusals++;continue;}
++        if(sgReuseRecords[entry-1].key!=key||record->rawBytes!=raw)continue;
++        if(span>=raw*2u){sgReuseStats.refusals++;break;}
++        span+=raw;
++        if(!tex->studio_codec_scratch)
++        {
++            tex->studio_codec_scratch=gEngfuncs._Mem_Alloc(r_temppool,raw,false,__FILE__,__LINE__);
++            sgReuseStats.maxScratchBytes=Q_max(sgReuseStats.maxScratchBytes,raw);
++        }
++        if(!tex->studio_codec_scratch){sgReuseStats.refusals++;break;}
++        restored=raw;result=mz_uncompress(tex->studio_codec_scratch,&restored,record->buffer,record->bytes);
++        if(result!=MZ_OK||restored!=raw){sgReuseStats.decodeFailures++;continue;}
++        sgReuseStats.comparedBytes+=raw;
++        if(memcmp(tex->studio_codec_scratch,pic->buffer,raw)){sgReuseStats.collisions++;continue;}
++        if(record->refs>=SG_STUDIO_BLOB_RECORDS||sg_studio_share.owners>=SG_STUDIO_BLOB_RECORDS)
++        {sgReuseStats.refusals++;break;}
++        matched=entry;break;
++    }
++    if(tex->studio_codec_scratch)
++    {gEngfuncs._Mem_Free(tex->studio_codec_scratch,__FILE__,__LINE__);tex->studio_codec_scratch=NULL;}
++    sgReuseStats.proofMs+=(gEngfuncs.pfnTime()-started)*1000;
++    if(!matched){sgReuseStats.misses++;return false;}
++    record=&sg_studio_blobs[matched-1];
++    if(tex->studio_pending_bytes<raw||sg_studio_residency.pendingBytes<raw)
++    {gEngfuncs.Host_Error("Raw-source pending accounting mismatch\n");return false;}
++    /* No yield or mutable-source call separates proof from this CPU ownership transfer. */
++    gEngfuncs._Mem_Free(pic->buffer,__FILE__,__LINE__);pic->buffer=record->buffer;
++    tex->studio_codec_bytes=record->bytes;tex->studio_shared_blob=matched;record->refs++;
++    tex->studio_pending_bytes-=raw-record->bytes;sg_studio_residency.pendingBytes-=raw;
++    sg_studio_share.owners++;sg_studio_share.sharedTotal++;sg_studio_share.savedBytes+=record->bytes;
++    sg_studio_share.peakSavedBytes=Q_max(sg_studio_share.peakSavedBytes,sg_studio_share.savedBytes);
++    sg_studio_codec.savedTotalBytes+=raw-record->bytes;sg_studio_codec.compressed++;
++    sgReuseStats.hits++;return true;
++}
++void SGStudioEncodeReuseReport( void )
++{
++#ifdef __EMSCRIPTEN__
++    EM_ASM({const s=Module["sgStudioEncodeReuse"]||(Module["sgStudioEncodeReuse"]={});s.enabled=Boolean($0);s.calls=$1;s.hits=$2;s.misses=$3;s.refusals=$4;s.decodeFailures=$5;s.collisions=$6;s.records=$7;s.peakRecords=$8;s.comparedBytes=$9;s.maxScratchBytes=$10;s.proofMs=$11;},
++        r_studio_encode_reuse.value&&r_studio_source_share.value&&r_studio_source_compress.value,
++        sgReuseStats.calls,sgReuseStats.hits,sgReuseStats.misses,sgReuseStats.refusals,sgReuseStats.decodeFailures,sgReuseStats.collisions,
++        sgReuseStats.records,sgReuseStats.peakRecords,(double)sgReuseStats.comparedBytes,(double)sgReuseStats.maxScratchBytes,sgReuseStats.proofMs);
++    EM_ASM({const s=Module["sgStudioEncodeReuse"];s.maxRecords=$0;s.maxCandidates=$1;s.maxRawBytes=$2;s.metadataBytes=$3;},
++        MAX_TEXTURES,SG_STUDIO_BLOB_CANDIDATES,SG_REUSE_RAW_LIMIT,(double)(sizeof(sgReuseRecords)+sizeof(sgReuseHeads)));
++#endif
++}
++
+ static size_t SGStudioReleasePackedSource( gl_texture_t *tex, size_t *virtualBytes )
+ {
+     unsigned int entry=tex->studio_shared_blob,*link;
+@@ -171,6 +279,7 @@
+         while(*link&&*link!=entry&&visited++<SG_STUDIO_BLOB_RECORDS)link=&sg_studio_blobs[*link-1].next;
+         if(*link!=entry){gEngfuncs.Host_Error("Packed-source registry mismatch\n");return 0;}
+     }
++    if(record->refs==1)SGReuseForget(entry);
+     *virtualBytes=record->bytes;
+     tex->studio_pending->buffer=NULL;tex->studio_shared_blob=0;sg_studio_share.owners--;
+     if(record->refs>1){record->refs--;sg_studio_share.savedBytes-=record->bytes;return 0;}
+@@ -193,10 +302,18 @@
+     byte *owned;
+     double started,elapsed;
+     int result;
++    unsigned int rawKey=0;
++    qboolean rawKeyKnown=false;
+     if( !r_studio_source_compress.value ) return;
+     sg_studio_codec.attempts++;
+     if( !pic || pic->size<4096 || pic->size>4u*1024u*1024u ||
+         pic->type!=PF_INDEXED_32 || pic->size!=(size_t)pic->width*pic->height ) goto fallback;
++    if(r_studio_encode_reuse.value&&r_studio_source_share.value)
++    {
++        rawKey=SGReuseRawKey(pic->buffer,pic->size);rawKeyKnown=true;
++        if(SGReuseEncodedSource(tex,rawKey))
++        {SGStudioShareReport();SGStudioCodecReport();return;}
++    }
+     raw=pic->size;packed=mz_compressBound(raw);
+     tex->studio_codec_scratch=gEngfuncs._Mem_Alloc(r_temppool,packed,false,__FILE__,__LINE__);
+     started=gEngfuncs.pfnTime();
+@@ -210,7 +327,7 @@
+     tex->studio_codec_bytes=packed;
+     tex->studio_pending_bytes-=raw-packed;sg_studio_residency.pendingBytes-=raw-packed;
+     sg_studio_codec.savedTotalBytes+=raw-packed;sg_studio_codec.compressed++;
+-    SGStudioSharePackedSource(tex);SGStudioShareReport();
++    SGStudioSharePackedSource(tex);if(rawKeyKnown)SGReuseRemember(tex,rawKey);SGStudioShareReport();
+     SGStudioCodecScratchFree(tex);SGStudioCodecReport();return;
+ fallback:
+     sg_studio_codec.fallback++;SGStudioCodecScratchFree(tex);SGStudioCodecReport();
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -815,6 +815,7 @@
+ extern convar_t	r_studio_texture_defer;
+ extern convar_t r_studio_source_compress;
+ extern convar_t r_studio_source_share;
++extern convar_t r_studio_encode_reuse;
+ extern convar_t	r_studio_mesh_compact;
+ void SGStudioMeshArraysReport( void );
+ extern convar_t	r_studio_mesh_cull;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -33,6 +33,7 @@
+ CVAR_DEFINE_AUTO( r_static_lightmap_batch, "0", FCVAR_GLCONFIG, "batch static lightmap triangles (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_texture_defer, "0", FCVAR_GLCONFIG, "defer eligible MDL texture uploads until first use (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_source_share, "0", FCVAR_GLCONFIG, "share exact owned packed studio sources (experimental)" );
++CVAR_DEFINE_AUTO( r_studio_encode_reuse, "0", FCVAR_GLCONFIG, "reuse exact live encoded studio sources before compression (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_source_compress, "0", FCVAR_GLCONFIG, "losslessly compress owned pending studio sources (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_mesh_compact, "0", FCVAR_GLCONFIG, "submit only current studio mesh arrays" );
+ CVAR_DEFINE_AUTO( r_studio_mesh_cull, "0", FCVAR_GLCONFIG, "cull off-screen classic static studio meshes (experimental)" );
+@@ -1156,6 +1157,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_texture_defer );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_compress );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_share );
++	gEngfuncs.Cvar_RegisterVariable( &r_studio_encode_reuse );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_compact );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_cull );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_clip_cache );
+--- a/ref/gl/gl_rmain.c
++++ b/ref/gl/gl_rmain.c
+@@ -14,6 +14,7 @@
+ */
+ 
+ #include "gl_local.h"
++extern void SGStudioEncodeReuseReport( void );
+ extern void SGClipCacheReport( void );
+ #include "xash3d_mathlib.h"
+ #include "library.h"
+@@ -1153,6 +1154,7 @@
+ 
+ 	tr.realframecount++; // right called after viewmodel events
+ 	R_RenderScene();
++    SGStudioEncodeReuseReport();
+ 	SGStudioMeshCullReport();
+     SGClipCacheReport();
+ 	SGStudioMeshArraysReport();

@@ -1,0 +1,34 @@
+diff --git a/cl_dll/saytext.cpp b/cl_dll/saytext.cpp
+--- a/cl_dll/saytext.cpp
++++ b/cl_dll/saytext.cpp
+@@ -28,6 +28,9 @@
+ #include "vgui_parser.h"
+ #include "draw_util.h"
+ #include "com_weapons.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ //#include "vgui_TeamFortressViewport.h"
+ 
+ extern float *GetClientColor( int clientIndex );
+@@ -384,6 +387,20 @@
+ 
+ void CHudSayText :: SayTextPrint( const char *pszBuf, int iBufSize, int clientIndex )
+ {
++#ifdef __EMSCRIPTEN__
++	// Keep native decoding/localization and HLTV playback ordering. The web
++	// shell owns compact presentation; other clients retain the native HUD.
++	float *color = clientIndex >= 1 && clientIndex <= 32 ? GetClientColor( clientIndex ) : NULL;
++	if( pszBuf && EM_ASM_INT({
++		if( typeof Module["onSGChat"] !== "function" ) return 0;
++		Module["onSGChat"]( UTF8ToString($0, 1024), [$1, $2, $3] );
++		return 1;
++	}, pszBuf, color ? color[0] : 1.0f, color ? color[1] : 1.0f, color ? color[2] : 1.0f ))
++	{
++		PlaySound( "misc/talk.wav", 1 );
++		return;
++	}
++#endif
+ 	// find an empty string slot
+ 	int i;
+ 	for ( i = 0; i < MAX_LINES; i++ )

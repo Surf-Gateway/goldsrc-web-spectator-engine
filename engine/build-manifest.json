@@ -1,0 +1,133 @@
+{
+  "status": "built",
+  "image": "docker.io/emscripten/emsdk@sha256:f8a157011b8fa61bdaab875bb1f0f08695229dffe086448d14b53538cae16bd3",
+  "sources": {
+    "xash3d-fwgs": {
+      "pin": "d1f529fe125f608dbfee00a279f715a859955334",
+      "patches": {
+        "0001-play-hldemo.patch": "bd709daba8effa21f340a6bcbffb16a24e16cb5c7dbf1b2efedf71e0c5262608",
+        "0004-demo-no-timeout-warning.patch": "ed32f88a98bfa4ce1de3624fa7a8883e19c0f2bbd4e0c935bcf52c2dd69aacba",
+        "0005-hide-demo-debug-overlay.patch": "23740ff52aa2de843250af61e22f32bc8692f09f5791969118e424bcc968d640",
+        "0006-browser-telemetry-bridge.patch": "9497a5b3883c21d1fabb9e2771761ee3472feb6bc1756dd62f48d2ad91a15c44",
+        "0007-goldsrc-hltv-status.patch": "933c3266bfba69bc37ddf205376a16355b4b577871838bb44ebdf53b14226105",
+        "0008-hltv-world-players.patch": "ae6f2fb93c9951fc57aaad97ee320d99e963a7b4846c2e49eb5f4e24434bd5aa",
+        "0009-player-display-clock.patch": "ee753bfc8e5cb27bf8ee4a7e9a9db6dc85383ef54a1135c1467d5e99210b4d81",
+        "0010-observed-player-mask.patch": "c3207d8d398a64bc87f63a8891d26da3063d594ac516a16ccc05c8b63da51e82",
+        "0012-web-stream-input.patch": "62b1305f0965ca5f08cca856fc19db61ad34b087b17f107130aaab75789f03fe",
+        "0013-hltv-motion-discontinuity.patch": "9679fb6fa12266c1257520cb21089065c488223befd61a8b0a3c6cf09dea6d0b",
+        "0014-studio-bodypart-offsets.patch": "3ad2994b00dcf28a89ed70837cf41a73e923f9c00abc632c4f0f58a73723ba90",
+        "0015-gl2-buffer-ownership.patch": "07d57ea9ccea4b6cd1ffa3851754c270b29719d12d8c85219df12bd3d05ff4e4",
+        "0016-static-lightmap-batch.patch": "07ef3aba44568571ef0e52d531d5dc94cb9b3b9645935c760a035a8ef06f7207",
+        "0017-static-lightmap-opaque-policy.patch": "378182e2efe6d73968f993e95bdc40cb0d7030edbb2b189946bb698622035335",
+        "0018-studio-texture-residency.patch": "17095290be47115f01aad910f9022c4a8a31d57d5f96157a3f75f2f58dc3014a",
+        "0019-studio-cache-prefix.patch": "d0482914c41309eece6f93627c8f3bd042e99a1a4dded8da3c2aacc98f265a90",
+        "0020-studio-mesh-frustum.patch": "16befeeb339dc51f787faca3c0d00fb5ec0897641bc77026faa50387b7e41f5d",
+        "0021-studio-source-compression.patch": "7f0bd78fb4ee3cb1cd9b25a60bac5b0feb610e69f253ed9e96c2f2263a1eb0bd",
+        "0022-studio-mesh-arrays.patch": "c719571f1dbd9c04b023cefaced7aaa2f20f08063a0e957ce62e9ec5ff24c842",
+        "0023-studio-restored-source-peak.patch": "91c4c8483b66476c9da2553df64d76ef290e2b1d7f4ce32213c8aeef502483c2",
+        "0024-studio-source-sharing.patch": "62155e6d8dce02f30df366c7053f607b1685fc951a6cdc9a0779be60c6f73fbe",
+        "0025-studio-clip-cache.patch": "83b1bdebc27712dddfd717d9c823323307ce126cc0c107971f39da17a3855c16",
+        "0026-studio-encode-reuse.patch": "c0151b8acd46585566bdf53f143222e068583410ccc0e028689fad7f93fdffc5",
+        "0027-studio-client-state-scope.patch": "288176c6b7a0a5f88d594c9d1c343e7bb361cbab0dc1a836892a307f82524074",
+        "0028-gl2-alpha-reference-reuse.patch": "8b465d5b5a523e00f50ad6884e8561803d1909edc0fcbd5732a692c0edb1c6ae",
+        "0029-opaque-base-surface-batch.patch": "75cac0a81442f3f9ce70ed356fcdc38e1180ca5b4c916696cb19328b261f931e",
+        "0030-web-stream-console.patch": "3605822175743bddb4f220ba913e7d834a9a40d9616c828f6115ad14e31d15a8",
+        "0031-gl2-vector-reuse.patch": "628c08cb182cf4673b1666924e9d19419cb12f666285978cfda53cf26b571e7d",
+        "0032-studio-constant-lighting.patch": "bb5901de95e797be3c79cfc911f2ec8f373fa8069d6ab1ac6c1537df9b8ba2f3",
+        "0033-owned-indexed-palette.patch": "d776411d1bc188e0778470cf04a6ac9926d5e5c3472264ec76d57cacac15ddc3",
+        "0034-studio-gpu-sharing.patch": "5dcfaa3705f7c582b49ad949fea6dae1ee73d1b1922c4ea02424a1351bf4778c",
+        "0035-gl2-vertex-invariance.patch": "d0fe4ddd649d07b2b5be7b3cf3358e3b8a06df2143649b98b4a1eba2d280b269",
+        "0036-active-player-availability.patch": "2dcba1d6b592216e7a8a95e416971a1ae105d5acb00e69a06f4c5f693e529db7",
+        "0037-wait-for-first-person-view.patch": "3294dc9c9622648170cb15decbdd163d7ce55f18ba3cd7ce8b586c3c2fa7a923",
+        "0039-wasm-wide-inflate.patch": "8b41baec1a1cd591d59d0d968d62f641943eedd92a32846d9cb73c373f6e294f",
+        "0040-studio-mesh-pvs.patch": "6ab85e404994c1125ac36ff8b90960f63f1cdb920ec770429780aff81ce996c2",
+        "0042-upload-error-transaction.patch": "23f6dd3290678f1a05477847a93006fddac4d2c6250c4fb083b77cdfa9245945",
+        "0043-web-capability-queries.patch": "de70d6483851375b6f6d8ff902324d4999cde695bd19582685fefc982a07632d",
+        "0044-exact-rgba-mips.patch": "70217863ec2027ac2d930ad69592ba5c1f7fdadc18c8f1c06d9a47d4934eebe0",
+        "0045-zero-local-light-vertices.patch": "02559b6d4c729525a7aa8457cf966dae4bd5813773a3dc5f1cbb7d6c1a575574",
+        "0046-exact-coordinate-validation.patch": "d45d84071c87a5495019498e9bed3c1684715c831b9b5d1f743266fd2db5c8a6",
+        "0047-selective-bounds-membership.patch": "6aaa489995820185fde4b868f5931c8f68a8add9e9de09421fa00fd06121ab14",
+        "0048-studio-background-realize.patch": "9e0c387c44d27205e01a0f0919d89b13d1f3636cda005cc06c70494e6748c031",
+        "0049-studio-texture-budget.patch": "255e16109a162914709869a0a6021ad3205750da8104f48407668aebc410b2ce",
+        "0050-studio-reduced-texture-storage.patch": "f1128a89f0e0b2ddf68eee6c8952a5cdc7e7db17d9b1d562951fb592d676a88b"
+      },
+      "generatedRuntime": {
+        "schemaVersion": 1,
+        "files": {
+          "client-array-cache.mjs": "3399a6a5f27a20ceb53b0f9b4e18b58cca4db1909cd5df18bed35617a3bf3bb4",
+          "client-index-cache.mjs": "89276f4d10445cce5c378cbd46331b54b5de11707364119c80e46366ca5494bd",
+          "transform.mjs": "93c917118930761fb6a5343dcce1388890a258e7d80e223a8e0cb503d1452470",
+          "install.mjs": "b68089e728241e5826a0ee9241b3336d1c9ecb466adead3ebc706a394b142af3"
+        }
+      }
+    },
+    "cs16-client": {
+      "pin": "08a2f2df22eb190d7d4017279ea519427e2abed7",
+      "patches": {
+        "0002-select-spectator-target.patch": "ac0af0be664b2bd044bfc2f7776105882a5914077d11973b77dc1bbf642f0c53",
+        "0003-corner-player-name.patch": "4401ac46c7d70584ef4b27ae1c83c393e0de9a49dc6175573f0fe5190d60a2c1",
+        "0011-reject-unobserved-targets.patch": "a9ed13b1283d8e1098598e436bc1065ef7f0531617c59d0dfa381252c05b16a4",
+        "0038-select-available-first-person-view.patch": "0f8b11b0635ef43bca8ff4da04aea6a2612c516e9596478aff8c372f811a129f",
+        "0041-compact-chat-bridge.patch": "0f5a19eafdb2a829fc6543acece92f809fe3c233275ff8bf2930c755a6d059c3"
+      }
+    }
+  },
+  "flags": {
+    "engine": "--emscripten; EMCC_CFLAGS=-s USE_SDL=2",
+    "client": "CMAKE_BUILD_TYPE=Release; BUILD_SERVER=OFF",
+    "jobs": 4
+  },
+  "artifacts": [
+    {
+      "path": "xash3d-fwgs/build/engine/xash.js",
+      "bytes": 532792,
+      "sha256": "42ba6b862deb5e6f38943cc9dd104abc484780e99597acf8ea762580c5c973d3"
+    },
+    {
+      "path": "xash3d-fwgs/build/engine/xash.wasm",
+      "bytes": 4142040,
+      "sha256": "cfa12ced5781b07555e7a499f183d9a6b93755ffce89eaf6d5a3d111c7360fa4"
+    },
+    {
+      "path": "xash3d-fwgs/build/filesystem/filesystem_stdio.wasm",
+      "bytes": 67740,
+      "sha256": "05565ce6d7026d1dbc0af291a84d7188f02272af7fbddf6bd9e8ae81840d6437"
+    },
+    {
+      "path": "xash3d-fwgs/build/ref/gl/libref_gles3compat.wasm",
+      "bytes": 334007,
+      "sha256": "a12e9f3812052781c1ce9c34621a1300f4c772e182a25672db7a1df551c085e6"
+    },
+    {
+      "path": "xash3d-fwgs/build/3rdparty/mainui/libmenu.wasm",
+      "bytes": 337609,
+      "sha256": "eb58ee254d22fad322e02ee4d1c4ef8b4242aaf045121ace6f0fdcaff0c9c695"
+    },
+    {
+      "path": "cs16-client/build/cl_dll/client_emscripten_javascript.wasm",
+      "bytes": 381050,
+      "sha256": "2093365afcfe50ef3c6ec6d22fe026df5dc40dd0fbce72518721b1e9157f594f"
+    },
+    {
+      "path": "cs16-client/build/3rdparty/mainui_cpp/menu_emscripten_javascript.wasm",
+      "bytes": 351023,
+      "sha256": "1480f0fd57c1dfc165c7f4b1044637f559c2475d5211c843178b3d2437a43390"
+    }
+  ],
+  "runtimeTransforms": {
+    "clientArrayCache": {
+      "schemaVersion": 1,
+      "files": {
+        "client-array-cache.mjs": "3399a6a5f27a20ceb53b0f9b4e18b58cca4db1909cd5df18bed35617a3bf3bb4",
+        "client-index-cache.mjs": "89276f4d10445cce5c378cbd46331b54b5de11707364119c80e46366ca5494bd",
+        "transform.mjs": "93c917118930761fb6a5343dcce1388890a258e7d80e223a8e0cb503d1452470",
+        "install.mjs": "b68089e728241e5826a0ee9241b3336d1c9ecb466adead3ebc706a394b142af3"
+      },
+      "factorySha256": "40429ad1ceea01b5d767e10251b821ccbc571af9ecf59f37fb55f8f48c123e6e",
+      "indexFactorySha256": "6c37e2c5ddf4aec145bc25775eb6b7c8c8e0166321d46d101da16dbfdbb73087",
+      "runtimeBeforeSha256": "0fe5062b06e9c318f1946bb672e441f5b3fc108b9aa9deb8aa4683286467573d",
+      "runtimeAfterSha256": "42ba6b862deb5e6f38943cc9dd104abc484780e99597acf8ea762580c5c973d3",
+      "scope": "Private temporary attribute/index prefix uploads and exact unsigned maximum scanning; bounded CPU shadows; optional per-frame temporary buffer rings; independent explicit Module opt-ins."
+    }
+  }
+}

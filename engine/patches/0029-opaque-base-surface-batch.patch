@@ -1,0 +1,240 @@
+--- a/ref/gl/gl_rsurf.c
++++ b/ref/gl/gl_rsurf.c
+@@ -812,6 +812,120 @@
+ DrawGLPoly
+ ================
+ */
++/* Owned opaque base pass only: fixed CPU data, no new GPU objects. */
++#include <stdint.h>
++#ifdef __EMSCRIPTEN__
++#include <emscripten/emscripten.h>
++#endif
++#define SG_BASE_VERTS 3072u
++enum { SG_BASE_TEXTURE,SG_BASE_UPLOAD,SG_BASE_SCOPE,SG_BASE_UNSUPPORTED,SG_BASE_CAPACITY };
++static float sgBaseVertices[SG_BASE_VERTS][5];
++static struct {
++    uint64_t calls,batched,fallback,originalVerts,triangleVerts,draws,textureFlushes,uploadFlushes,scopeFlushes,unsupportedFlushes,capacityFlushes,abandoned,nested,discardedVerts;
++    uint32_t active,depth,count,texture,valid;
++} sgBaseWork;
++void SGBaseReset(void);
++void SGBaseReport(void);
++static void SGBaseDiscard(void)
++{
++    sgBaseWork.discardedVerts+=sgBaseWork.count;sgBaseWork.count=sgBaseWork.valid=0;
++}
++static void SGBaseFlush(int reason)
++{
++    uint32_t i;
++    if(sgBaseWork.count){
++        pglBegin(GL_TRIANGLES);
++        for(i=0;i<sgBaseWork.count;i++){
++            pglTexCoord2f(sgBaseVertices[i][3],sgBaseVertices[i][4]);
++            pglVertex3fv(sgBaseVertices[i]);
++        }
++        pglEnd();sgBaseWork.draws++;
++        if(reason==SG_BASE_TEXTURE)sgBaseWork.textureFlushes++;
++        else if(reason==SG_BASE_UPLOAD)sgBaseWork.uploadFlushes++;
++        else if(reason==SG_BASE_SCOPE)sgBaseWork.scopeFlushes++;
++        else if(reason==SG_BASE_CAPACITY)sgBaseWork.capacityFlushes++;
++        else sgBaseWork.unsupportedFlushes++;
++    }
++    sgBaseWork.count=sgBaseWork.valid=0;
++}
++void SGBaseReset(void)
++{
++    if(sgBaseWork.depth)sgBaseWork.abandoned++;
++    SGBaseDiscard();sgBaseWork.active=sgBaseWork.depth=0;
++}
++static void SGBaseBegin(void)
++{
++    if(sgBaseWork.depth){sgBaseWork.nested++;SGBaseDiscard();sgBaseWork.active=0;sgBaseWork.depth++;return;}
++    sgBaseWork.depth=1;sgBaseWork.active=r_base_surface_batch.value!=0;
++}
++static void SGBaseEnd(void)
++{
++    if(sgBaseWork.depth==1)SGBaseFlush(SG_BASE_SCOPE);
++    if(sgBaseWork.depth)sgBaseWork.depth--;
++    if(!sgBaseWork.depth)sgBaseWork.active=sgBaseWork.valid=0;
++}
++static qboolean SGBasePrepare(const msurface_t *fa,const texture_t *texture)
++{
++    const glpoly2_t *poly=fa->polys;
++    gl_texture_t *glt;
++    if(!sgBaseWork.active||sgBaseWork.depth!=1||!r_base_surface_batch.value||!RI.currententity||
++       RI.currententity->curstate.rendermode!=kRenderNormal||!texture||!poly||poly->numverts<3||poly->numverts>8192||
++       FBitSet(fa->flags|poly->flags,SURF_DRAWSKY|SURF_DRAWTURB|SURF_DRAWTILED|SURF_CONVEYOR|SURF_TRANSPARENT)||
++       texture->gl_texturenum<=0||texture->gl_texturenum>=MAX_TEXTURES||glState.activeTMU!=XASH_TEXTURE0){
++        SGBaseFlush(SG_BASE_UNSUPPORTED);return false;
++    }
++    glt=R_GetTexture(texture->gl_texturenum);
++    if(glt->target!=GL_TEXTURE_2D||(glt->studio_state&&glt->studio_state!=SG_STUDIO_RESIDENT)){
++        SGBaseFlush(SG_BASE_UNSUPPORTED);return false;
++    }
++    if(sgBaseWork.count&&glState.currentTexturesIndex[XASH_TEXTURE0]!=(int)sgBaseWork.texture){
++        sgBaseWork.abandoned++;SGBaseDiscard();sgBaseWork.active=0;return false;
++    }
++    if(sgBaseWork.valid&&sgBaseWork.texture!=(uint32_t)texture->gl_texturenum)SGBaseFlush(SG_BASE_TEXTURE);
++    sgBaseWork.texture=texture->gl_texturenum;sgBaseWork.valid=1;return true;
++}
++static qboolean SGBaseAppend(const msurface_t *fa,qboolean eligible)
++{
++    const glpoly2_t *poly=fa->polys;int i,j,k;
++    sgBaseWork.calls++;
++    if(!eligible||!r_base_surface_batch.value||!sgBaseWork.active||sgBaseWork.depth!=1){
++        SGBaseFlush(SG_BASE_UNSUPPORTED);sgBaseWork.fallback++;return false;
++    }
++    if(glState.activeTMU!=XASH_TEXTURE0||glState.currentTexturesIndex[XASH_TEXTURE0]!=(int)sgBaseWork.texture){
++        sgBaseWork.abandoned++;SGBaseDiscard();sgBaseWork.active=0;sgBaseWork.fallback++;return false;
++    }
++    sgBaseWork.batched++;sgBaseWork.originalVerts+=poly->numverts;
++    for(i=1;i+1<poly->numverts;i++){
++        const float *tri[3]={poly->verts[0],poly->verts[i],poly->verts[i+1]};
++        for(j=0;j<3;j++){
++            float *dst=sgBaseVertices[sgBaseWork.count++];
++            for(k=0;k<3;k++)dst[k]=tri[j][k];
++            dst[3]=tri[j][3]+0.0f;dst[4]=tri[j][4]+0.0f;
++        }
++        sgBaseWork.valid=1;sgBaseWork.triangleVerts+=3;
++        if(sgBaseWork.count==SG_BASE_VERTS)SGBaseFlush(SG_BASE_CAPACITY);
++    }
++    return true;
++}
++void SGBaseReport(void)
++{
++#ifdef __EMSCRIPTEN__
++    EM_ASM({const s=Module["sgBaseBatch"]||(Module["sgBaseBatch"]={});s.schemaVersion=1;
++      s.calls=$0;s.batched=$1;s.fallback=$2;s.originalVerts=$3;s.triangleVerts=$4;s.draws=$5;
++      s.textureFlushes=$6;s.uploadFlushes=$7;s.scopeFlushes=$8;s.unsupportedFlushes=$9;s.capacityFlushes=$10;
++      s.abandoned=$11;s.nested=$12;s.discardedVerts=$13;s.enabled=Boolean($14&1);s.active=Boolean($14&2);
++      s.scopeOpen=Boolean($14&4);s.valid=Boolean($14&8);s.pending=$14>>>4;s.numericMetadataBytes=$15;
++      s.batchVertices=3072;s.cpuVertexBytes=61440;},
++      (double)sgBaseWork.calls,(double)sgBaseWork.batched,(double)sgBaseWork.fallback,
++      (double)sgBaseWork.originalVerts,(double)sgBaseWork.triangleVerts,(double)sgBaseWork.draws,
++      (double)sgBaseWork.textureFlushes,(double)sgBaseWork.uploadFlushes,(double)sgBaseWork.scopeFlushes,
++      (double)sgBaseWork.unsupportedFlushes,(double)sgBaseWork.capacityFlushes,(double)sgBaseWork.abandoned,
++      (double)sgBaseWork.nested,(double)sgBaseWork.discardedVerts,
++      (r_base_surface_batch.value!=0)|(sgBaseWork.active<<1)|((sgBaseWork.depth!=0)<<2)|(sgBaseWork.valid<<3)|(sgBaseWork.count<<4),
++      sizeof(sgBaseWork)+sizeof(sgBaseVertices));
++#endif
++}
++
+ static void DrawGLPoly( glpoly2_t *p, float xScale, float yScale )
+ {
+ 	float		*v;
+@@ -1332,6 +1446,7 @@
+ 
+ 			R_SetCacheState( fa );
+ 
++            SGBaseFlush(SG_BASE_UPLOAD);
+ #if XASH_WES
+ 			GL_Bind( XASH_TEXTURE1, tr.lightmapTextures[fa->lightmaptexturenum] );
+ 			pglTexParameteri( GL_TEXTURE_2D, GL_GENERATE_MIPMAP_SGIS, GL_TRUE );
+@@ -1377,13 +1492,17 @@
+ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
+ {
+ 	texture_t	*t;
++    qboolean sgEligible;
+ 
+ 	r_stats.c_world_polys++;
+ 
+ 	if( fa->flags & SURF_DRAWSKY )
++    { SGBaseFlush(SG_BASE_UNSUPPORTED);
+ 		return; // already handled
++    }
+ 
+ 	t = R_TextureAnimation( fa );
++    sgEligible=SGBasePrepare(fa,t);
+ 
+ 	if( FBitSet( fa->flags, SURF_DRAWTURB ))
+ 	{
+@@ -1395,6 +1514,7 @@
+ 
+ 	R_RenderFullbrightForSurface( fa, t );
+ 	R_RenderDetailsForSurface( fa, t );
++    if(!SGBaseAppend(fa,sgEligible))
+ 	DrawGLPoly( fa->polys, 0.0f, 0.0f );
+ 	R_RenderDecalsForSurface( fa, cull_type );
+ 	R_RenderLightmapForSurface( fa );
+@@ -1440,6 +1560,7 @@
+ 	}
+ 
+ 	R_DrawVBO( !r_fullbright->value && !!WORLDMODEL->lightdata, true );
++    SGBaseBegin();
+ 
+ 	for( i = 0; i < WORLDMODEL->numtextures; i++ )
+ 	{
+@@ -1467,6 +1588,7 @@
+ 			R_RenderBrushPoly( s, CULL_VISIBLE );
+ 		t->texturechain = NULL;
+ 	}
++    SGBaseEnd();
+ }
+ 
+ /*
+@@ -1787,9 +1909,11 @@
+ 		qsort( gpGlobals->draw_surfaces, num_sorted, sizeof( sortedface_t ), R_SurfaceCompare );
+ 
+ 	// draw sorted translucent surfaces
++    SGBaseBegin();
+ 	for( i = 0; i < num_sorted; i++ )
+ 		if( !allow_vbo || !R_AddSurfToVBO( gpGlobals->draw_surfaces[i].surf, true ) )
+ 			R_RenderBrushPoly( gpGlobals->draw_surfaces[i].surf, gpGlobals->draw_surfaces[i].cull );
++    SGBaseEnd();
+ 	R_DrawVBO( R_HasLightmap(), true );
+ 
+ 	if( e->curstate.rendermode == kRenderTransColor )
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -812,6 +812,7 @@
+ extern convar_t	r_lockfrustum;
+ extern convar_t	r_traceglow;
+ extern convar_t	r_static_lightmap_batch;
++extern convar_t r_base_surface_batch;
+ extern convar_t	r_studio_texture_defer;
+ extern convar_t r_studio_source_compress;
+ extern convar_t r_studio_source_share;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -31,6 +31,7 @@
+ CVAR_DEFINE_AUTO( r_traceglow, "0", FCVAR_GLCONFIG, "cull flares behind models" );
+ CVAR_DEFINE_AUTO( gl_round_down, "2", FCVAR_GLCONFIG|FCVAR_READ_ONLY, "round texture sizes to nearest POT value" );
+ CVAR_DEFINE_AUTO( r_static_lightmap_batch, "0", FCVAR_GLCONFIG, "batch static lightmap triangles (experimental)" );
++CVAR_DEFINE_AUTO( r_base_surface_batch, "0", FCVAR_GLCONFIG, "batch owned opaque base surfaces" );
+ CVAR_DEFINE_AUTO( r_studio_texture_defer, "0", FCVAR_GLCONFIG, "defer eligible MDL texture uploads until first use (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_source_share, "0", FCVAR_GLCONFIG, "share exact owned packed studio sources (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_encode_reuse, "0", FCVAR_GLCONFIG, "reuse exact live encoded studio sources before compression (experimental)" );
+@@ -1156,6 +1157,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_ripple_spawntime );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_shadows );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_static_lightmap_batch );
++	gEngfuncs.Cvar_RegisterVariable( &r_base_surface_batch );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_texture_defer );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_compress );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_share );
+--- a/ref/gl/gl_rmain.c
++++ b/ref/gl/gl_rmain.c
+@@ -17,6 +17,8 @@
+ void SGGL2AlphaReport(void);
+ extern void SGStudioClientScopeReport( void );
+ extern void SGStudioClientScopeReset( void );
++extern void SGBaseReset(void);
++extern void SGBaseReport(void);
+ extern void SGStudioEncodeReuseReport( void );
+ extern void SGClipCacheReport( void );
+ #include "xash3d_mathlib.h"
+@@ -1059,6 +1061,7 @@
+ void R_BeginFrame( qboolean clearScene )
+ {
+     SGStudioClientScopeReset();
++    SGBaseReset();
+ 	glConfig.softwareGammaUpdate = false;	// in case of possible fails
+ 
+ 	if(( gl_clear->value || ENGINE_GET_PARM( PARM_DEV_OVERVIEW )) &&
+@@ -1160,6 +1163,7 @@
+ 	R_RenderScene();
+     SGStudioEncodeReuseReport();
+     SGStudioClientScopeReport();
++    SGBaseReport();
+     SGGL2AlphaReport();
+ 	SGStudioMeshCullReport();
+     SGClipCacheReport();

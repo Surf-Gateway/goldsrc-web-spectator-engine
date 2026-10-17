@@ -1,0 +1,124 @@
+diff --git a/engine/client/cl_parse.c b/engine/client/cl_parse.c
+index 0d2ba08..57fd2a4 100644
+--- a/engine/client/cl_parse.c
++++ b/engine/client/cl_parse.c
+@@ -14,6 +14,9 @@ GNU General Public License for more details.
+ */
+ 
+ #include "common.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include "client.h"
+ #include "net_encode.h"
+ #include "particledef.h"
+@@ -1521,6 +1524,9 @@ void CL_UpdateUserinfo( sizebuf_t *msg, connprotocol_t proto )
+ 	// in GoldSrc userinfo might be empty but userid is always sent as separate value
+ 	// thus avoids clean up even after client disconnect
+ 	player->userid = id;
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ if(Module["onSGRoster"]) Module["onSGRoster"]($0, $1, UTF8ToString($2), $3); }, slot + 1, id, player->name, player->spectator);
++#endif
+ }
+ 
+ /*
+@@ -2420,6 +2426,18 @@ void CL_ParseUserMessage( sizebuf_t *msg, int svc_num, connprotocol_t proto )
+ 
+ 	// parse user message into buffer
+ 	MSG_ReadBytes( msg, pbuf, iSize );
++#ifdef __EMSCRIPTEN__
++	// Consume opaque SGTV1 bytes before the unregistered client-DLL stub.
++	// Copy synchronously: pbuf is stack memory, not retained WASM memory.
++	if( proto == PROTO_GOLDSRC || proto == PROTO_LEGACY )
++	{
++		if( !MSG_CheckOverflow( msg ) && !Q_strcmp( clgame.msg[i].name, "SGTV1" ))
++		{
++			EM_ASM({ if(Module["onSGTelemetry"]) Module["onSGTelemetry"](HEAPU8.slice($0, $0 + $1)); }, pbuf, iSize);
++			return;
++		}
++	}
++#endif
+ 
+ 	if( cl_trace_messages.value )
+ 	{
+diff --git a/engine/client/cl_parse_gs.c b/engine/client/cl_parse_gs.c
+index 5bfce81..55b5000 100644
+--- a/engine/client/cl_parse_gs.c
++++ b/engine/client/cl_parse_gs.c
+@@ -14,6 +14,9 @@ GNU General Public License for more details.
+ */
+ 
+ #include "common.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include "client.h"
+ #include "net_encode.h"
+ #include "particledef.h"
+@@ -781,4 +784,9 @@ void CL_ParseGoldSrcServerMessage( sizebuf_t *msg )
+ 			break;
+ 		}
+ 	}
++#ifdef __EMSCRIPTEN__
++	// Validate clock association after the entire packet, including svc_time.
++	EM_ASM({ if(Module["onSGPacket"]) Module["onSGPacket"]($0, UTF8ToString($1)); }, cl.mtime[0], clgame.mapname);
++#endif
++
+ }
+diff --git a/engine/client/cl_view.c b/engine/client/cl_view.c
+index 0a35b73..b98ad87 100644
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -14,6 +14,9 @@ GNU General Public License for more details.
+ */
+ 
+ #include "common.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include "client.h"
+ #include "const.h"
+ #include "entity_types.h"
+@@ -404,6 +407,18 @@ void V_RenderView( void )
+ 	// draw debug triangles on a server
+ 	SV_DrawDebugTriangles ();
+ 	ref.dllFuncs.GL_BackendEndFrame ();
++#ifdef __EMSCRIPTEN__
++	// The client DLL publishes its actual first-person target after CalcRefdef.
++	// cl.time is also rp.time: never substitute packet arrival or wall time.
++	{
++		int slot = (int)Cvar_VariableValue( "_sg_web_target" );
++		int userid = 0;
++		if( slot >= 1 && slot <= cl.maxclients && slot <= MAX_CLIENTS && cl.players[slot - 1].name[0] )
++			userid = cl.players[slot - 1].userid;
++		else slot = 0;
++		EM_ASM({ if(Module["onSGFrame"]) Module["onSGFrame"]($0, $1, $2); }, rp.time, slot, userid);
++	}
++#endif
+ }
+ 
+ #define POINT_SIZE		16.0f
+diff --git a/engine/client/cl_main.c b/engine/client/cl_main.c
+index d4593b5..6431d65 100644
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -14,6 +14,9 @@ GNU General Public License for more details.
+ */
+ 
+ #include "common.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include "client.h"
+ #include "net_encode.h"
+ #include "cl_tent.h"
+@@ -1487,6 +1490,9 @@ CL_ClearState
+ void CL_ClearState( void )
+ {
+ 	int	i;
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ if(Module["onSGReset"]) Module["onSGReset"](); });
++#endif
+ 
+ 	CL_ClearResourceLists();
+ 

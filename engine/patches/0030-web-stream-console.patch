@@ -1,0 +1,11 @@
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -590,7 +590,7 @@
+ 		CL_DrawHUD( CL_CHANGELEVEL );
+ 		ref.dllFuncs.R_ShowTextures();
+ 		R_ShowTree();
+-		Con_DrawConsole();
++		if(!CL_WebStreamActive()) Con_DrawConsole();
+ 		UI_UpdateMenu( host.realtime );
+ 		Con_DrawVersion();
+ 		Con_DrawDebug(); // must be last

@@ -1,0 +1,15 @@
+diff --git a/ref/gl/gl_image.c b/ref/gl/gl_image.c
+--- a/ref/gl/gl_image.c
++++ b/ref/gl/gl_image.c
+@@ -1942,7 +1942,10 @@
+ 	Assert( tex != NULL );
+ 
+ 	// catch possible errors
+-	if( (gl_check_errors.value || sg_gpu_checking) && ( err = pglGetError()) != GL_NO_ERROR )
++	// Shared uploads retain mandatory before/after transaction checks. Error
++	// flags persist until read, so polling each mip is unnecessary outside
++	// explicit debug mode and can synchronize the browser with the GPU.
++	if( gl_check_errors.value && ( err = pglGetError()) != GL_NO_ERROR )
+ 	{
+ 		if(sg_gpu_checking)sg_gpu_upload_error=true;
+ 		if(gl_check_errors.value)gEngfuncs.Con_Printf( S_OPENGL_ERROR "%s while uploading %s [%s]\n", GL_ErrorString( err ), tex->name, GL_TargetToString( tex->target ));

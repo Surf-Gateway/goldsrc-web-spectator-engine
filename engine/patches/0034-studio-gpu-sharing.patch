@@ -1,0 +1,660 @@
+--- a/ref/gl/gl_image.c
++++ b/ref/gl/gl_image.c
+@@ -14,6 +14,7 @@
+ */
+ 
+ #include <stdarg.h>
++#include <stdint.h>
+ #include "gl_local.h"
+ #include "crclib.h"
+ #include "miniz.h"
+@@ -84,6 +85,450 @@
+     size_t bytes, rawBytes;
+     unsigned int key, refs, next;
+ } sg_studio_blobs[SG_STUDIO_BLOB_RECORDS];
++/* Detached ownership primitive, not an admission proof or production patch.
++ * Register/adopt only after independently verified source/upload metadata.
++ * Object allocation, full replacement and source-key retirement remain callers'
++ * responsibilities. No source/palette/RGBA pointers are retained here. */
++typedef struct {unsigned int id,generation;}sg_gpu_handle_t;
++typedef struct {
++    GLuint object;
++    unsigned int generation,refs,next,nextFree;
++    size_t bytes;
++}sg_gpu_group_t;
++static sg_gpu_group_t sg_gpu_groups[MAX_TEXTURES];
++static sg_gpu_handle_t sg_gpu_slots[MAX_TEXTURES];
++static unsigned int sg_gpu_buckets[MAX_TEXTURES];
++static struct {
++    unsigned int ready,freeHead,generation,groups,owners,refusals;
++    size_t uniqueBytes;
++}sg_gpu;
++
++static unsigned int SGGpuSlot( const gl_texture_t *tex )
++{
++    uintptr_t address=(uintptr_t)tex,base=(uintptr_t)gl_textures;
++    Assert(address>=base&&address<base+sizeof(gl_textures)&&!((address-base)%sizeof(*tex)));
++    return (unsigned int)((address-base)/sizeof(*tex));
++}
++static sg_gpu_group_t *SGGpuLookup( sg_gpu_handle_t handle )
++{
++    sg_gpu_group_t *group;
++    if(!handle.id||handle.id>MAX_TEXTURES)return NULL;
++    group=&sg_gpu_groups[handle.id-1];
++    if(!group->refs||group->generation!=handle.generation)return NULL;
++    return group;
++}
++static void SGGpuInit( void )
++{
++    unsigned int i;
++    if(sg_gpu.ready)return;
++    for(i=0;i<MAX_TEXTURES;i++)sg_gpu_groups[i].nextFree=i+2;
++    sg_gpu_groups[MAX_TEXTURES-1].nextFree=0;
++    sg_gpu.freeHead=1;sg_gpu.ready=1;
++}
++static qboolean SGGpuObjectKnown( GLuint object )
++{
++    unsigned int entry,visited=0;
++    for(entry=sg_gpu_buckets[object%MAX_TEXTURES];entry;entry=sg_gpu_groups[entry-1].next)
++    {
++        if(++visited>16||entry>MAX_TEXTURES)return true;
++        if(sg_gpu_groups[entry-1].object==object)return true;
++    }
++    return false;
++}
++static sg_gpu_handle_t SGGpuRegister( gl_texture_t *tex )
++{
++    unsigned int slot=SGGpuSlot(tex),entry,bucket,visited=0,walk;
++    sg_gpu_group_t *group;
++    sg_gpu_handle_t empty={0,0};
++    if(!slot||!glw_state.initialized||!tex->texnum||!tex->size||tex->target!=GL_TEXTURE_2D||
++       sg_gpu_slots[slot].id||sg_gpu.generation==UINT32_MAX||SGGpuObjectKnown(tex->texnum))
++    {sg_gpu.refusals++;return empty;}
++    SGGpuInit();bucket=tex->texnum%MAX_TEXTURES;
++    for(walk=sg_gpu_buckets[bucket];walk;walk=sg_gpu_groups[walk-1].next)
++        if(++visited>=16){sg_gpu.refusals++;return empty;}
++    if(!sg_gpu.freeHead||tex->size>SIZE_MAX-sg_gpu.uniqueBytes){sg_gpu.refusals++;return empty;}
++    entry=sg_gpu.freeHead;group=&sg_gpu_groups[entry-1];sg_gpu.freeHead=group->nextFree;
++    memset(group,0,sizeof(*group));group->object=tex->texnum;group->refs=1;group->bytes=tex->size;
++    group->generation=++sg_gpu.generation;group->next=sg_gpu_buckets[bucket];sg_gpu_buckets[bucket]=entry;
++    sg_gpu_slots[slot]=(sg_gpu_handle_t){entry,group->generation};
++    sg_gpu.groups++;sg_gpu.owners++;sg_gpu.uniqueBytes+=group->bytes;
++    return sg_gpu_slots[slot];
++}
++static void SGGpuInvalidateObject( GLuint object )
++{
++    unsigned int i;
++    GLint active=glState.activeTMU;
++    for(i=0;i<MAX_TEXTURE_UNITS;i++)
++    {
++        if(glState.currentTextures[i]!=object)continue;
++        if(glState.currentTextureTargets[i]!=GL_NONE)
++        {GL_SelectTexture(i);pglDisable(glState.currentTextureTargets[i]);}
++        glState.currentTextureTargets[i]=GL_NONE;glState.currentTextures[i]=-1;glState.currentTexturesIndex[i]=0;
++    }
++    if(glState.activeTMU!=active)GL_SelectTexture(active);
++}
++static qboolean SGGpuAdopt( gl_texture_t *tex, sg_gpu_handle_t handle )
++{
++    unsigned int slot=SGGpuSlot(tex);
++    sg_gpu_group_t *group=SGGpuLookup(handle);
++    GLuint reserved=tex->texnum;
++    if(!slot||!glw_state.initialized||!group||sg_gpu_slots[slot].id||!reserved||reserved==group->object||
++       tex->target!=GL_TEXTURE_2D||tex->size!=group->bytes||group->refs>=MAX_TEXTURES||SGGpuObjectKnown(reserved))
++    {sg_gpu.refusals++;return false;}
++    /* The caller has already copied proven identical uploaded scalar metadata. */
++    SGGpuInvalidateObject(reserved);pglDeleteTextures(1,&reserved);
++    tex->texnum=group->object;group->refs++;sg_gpu.owners++;sg_gpu_slots[slot]=handle;
++    return true;
++}
++/* Called from actual deletion instead of unconditional physical deletion.
++ * An ordinary owner or the final group owner deletes; other members release
++ * their logical ref only. Broken registered ownership must never fall through. */
++static qboolean SGGpuRelease( gl_texture_t *tex )
++{
++    unsigned int slot=SGGpuSlot(tex),*link,visited=0;
++    sg_gpu_handle_t handle=sg_gpu_slots[slot];
++    sg_gpu_group_t *group;
++    if(!handle.id)return true;
++    group=SGGpuLookup(handle);
++    if(!group||group->object!=tex->texnum)
++    {gEngfuncs.Host_Error("Invalid studio GPU ownership\n");return false;}
++    link=&sg_gpu_buckets[group->object%MAX_TEXTURES];
++    if(group->refs==1)
++    {
++        while(*link&&*link!=handle.id&&visited++<16)
++        {
++            if(*link>MAX_TEXTURES){gEngfuncs.Host_Error("Invalid studio GPU registry link\n");return false;}
++            link=&sg_gpu_groups[*link-1].next;
++        }
++        if(*link!=handle.id){gEngfuncs.Host_Error("Invalid studio GPU registry\n");return false;}
++    }
++    memset(&sg_gpu_slots[slot],0,sizeof(sg_gpu_slots[slot]));sg_gpu.owners--;
++    if(--group->refs)return false;
++    *link=group->next;sg_gpu.groups--;sg_gpu.uniqueBytes-=group->bytes;
++    memset(group,0,sizeof(*group));group->nextFree=sg_gpu.freeHead;sg_gpu.freeHead=handle.id;
++    return true;
++}
++/* Full-image replacement primitive. Caller supplies a freshly generated name
++ * when >1 refs remain. Zero refuses without changing refs/name/cache/flags.
++ * This does not perform GPU allocation, upload or old-content reconstruction. */
++static qboolean SGGpuDetach( gl_texture_t *tex, GLuint replacement )
++{
++    sg_gpu_handle_t handle=sg_gpu_slots[SGGpuSlot(tex)];
++    sg_gpu_group_t *group;
++    GLuint original=tex->texnum;
++    if(!handle.id)return true;
++    group=SGGpuLookup(handle);
++    if(!group||group->object!=original)
++    {gEngfuncs.Host_Error("Invalid studio GPU detach\n");return false;}
++    if(group->refs>1&&(!replacement||replacement==original||SGGpuObjectKnown(replacement)))
++    {sg_gpu.refusals++;return false;}
++    if(group->refs>1)
++    {
++        SGGpuRelease(tex);SGGpuInvalidateObject(original);tex->texnum=replacement;
++    }
++    else if(!SGGpuRelease(tex))return false;
++    /* A formerly grouped full replacement always receives complete storage. */
++    ClearBits(tex->flags,TF_IMG_UPLOADED);
++    return true;
++}
++static void SGGpuResetEmpty( void )
++{
++    unsigned int i;
++    Assert(!sg_gpu.groups&&!sg_gpu.owners&&!sg_gpu.uniqueBytes);
++    for(i=0;i<MAX_TEXTURES;i++)Assert(!sg_gpu_slots[i].id&&!sg_gpu_groups[i].refs&&!sg_gpu_buckets[i]);
++    /* Generation stays monotonic across map/context reuse. */
++    sg_gpu.ready=0;sg_gpu.freeHead=0;
++}
++
++/* Detached source-proof primitive. The actual source registry/flags/layouts
++ * must be supplied by the pinned native adapter. No GPU object or source ref is
++ * acquired here. Capture before decode; never keep this stack key's palette
++ * past the separate bounded admission layer's lifetime. */
++typedef struct {
++    int npot,maxTextureSize,desktopBits,quake,multisamples;
++    float roundDown,nearest,anisotropy,lodBias;
++}sg_gpu_upload_profile_t;
++typedef struct {
++    unsigned int blob,serial,width,height,depth,type,imageFlags,encode,numMips,textureFlags;
++    size_t rawBytes,codecBytes;
++    rgba_t fog;
++    sg_gpu_upload_profile_t profile;
++    byte palette[1024];
++}sg_gpu_source_key_t;
++static unsigned int sg_gpu_source_serials[SG_STUDIO_BLOB_RECORDS],sg_gpu_source_sequence;
++
++static void SGGpuSourceCreated( unsigned int blob )
++{
++    if(!blob||blob>SG_STUDIO_BLOB_RECORDS)
++    {gEngfuncs.Host_Error("Invalid studio GPU source slot\n");return;}
++    /* Overflow disables new admissions; old live serials remain distinguishable. */
++    sg_gpu_source_serials[blob-1]=sg_gpu_source_sequence==UINT32_MAX?0:++sg_gpu_source_sequence;
++}
++static void SGGpuSourceRetired( unsigned int blob )
++{
++    if(!blob||blob>SG_STUDIO_BLOB_RECORDS)
++    {gEngfuncs.Host_Error("Invalid studio GPU source retirement\n");return;}
++    sg_gpu_source_serials[blob-1]=0;
++    /* The following admission layer must also unlink/free this blob's keys. */
++}
++static qboolean SGGpuSourceCurrent( const sg_gpu_source_key_t *key )
++{
++    if(!key->blob||key->blob>SG_STUDIO_BLOB_RECORDS||!key->serial)return false;
++    return sg_gpu_source_serials[key->blob-1]==key->serial&&
++        sg_studio_blobs[key->blob-1].refs&&sg_studio_blobs[key->blob-1].buffer&&
++        sg_studio_blobs[key->blob-1].rawBytes==key->rawBytes&&sg_studio_blobs[key->blob-1].bytes==key->codecBytes;
++}
++static qboolean SGGpuSourceCapture( const gl_texture_t *tex, const sg_gpu_upload_profile_t *profile, sg_gpu_source_key_t *key )
++{
++    const rgbdata_t *pic=tex->studio_pending;
++    unsigned int blob=tex->studio_shared_blob;
++    if(!pic||!pic->buffer||!pic->palette||!blob||blob>SG_STUDIO_BLOB_RECORDS||!sg_gpu_source_serials[blob-1]||
++       !sg_studio_blobs[blob-1].refs||sg_studio_blobs[blob-1].buffer!=pic->buffer||
++       sg_studio_blobs[blob-1].rawBytes!=pic->size||sg_studio_blobs[blob-1].bytes!=tex->studio_codec_bytes||
++       pic->type!=PF_INDEXED_32||pic->depth!=1||pic->numMips>1||!pic->width||!pic->height||
++       pic->size!=(size_t)pic->width*pic->height||pic->size>4u*1024u*1024u||
++       tex->studio_codec_bytes<16||tex->studio_codec_bytes>=pic->size||tex->original||tex->target!=GL_TEXTURE_2D||
++       (tex->studio_state!=SG_STUDIO_PENDING&&tex->studio_state!=SG_STUDIO_RESOLVING)||
++       (pic->flags&~(IMAGE_HAS_COLOR|IMAGE_HAS_ALPHA|IMAGE_ONEBIT_ALPHA))||
++       (tex->flags&~(TF_NOMIPMAP|TF_HAS_ALPHA))||
++       ((tex->flags&TF_HAS_ALPHA)!=0)!=((pic->flags&IMAGE_HAS_ALPHA)!=0))return false;
++    memset(key,0,sizeof(*key));key->blob=blob;key->serial=sg_gpu_source_serials[blob-1];
++    key->width=pic->width;key->height=pic->height;key->depth=pic->depth;key->type=pic->type;
++    key->imageFlags=pic->flags;key->encode=pic->encode;key->numMips=pic->numMips;key->textureFlags=tex->flags;
++    key->rawBytes=pic->size;key->codecBytes=tex->studio_codec_bytes;
++    memcpy(key->fog,pic->fogParams,sizeof(key->fog));memcpy(key->palette,pic->palette,sizeof(key->palette));
++    /* Copy fields explicitly; padding in a caller's profile is not evidence. */
++    key->profile.npot=profile->npot;key->profile.maxTextureSize=profile->maxTextureSize;
++    key->profile.desktopBits=profile->desktopBits;key->profile.quake=profile->quake;key->profile.multisamples=profile->multisamples;
++    memcpy(&key->profile.roundDown,&profile->roundDown,sizeof(profile->roundDown));
++    memcpy(&key->profile.nearest,&profile->nearest,sizeof(profile->nearest));
++    memcpy(&key->profile.anisotropy,&profile->anisotropy,sizeof(profile->anisotropy));
++    memcpy(&key->profile.lodBias,&profile->lodBias,sizeof(profile->lodBias));
++    return true;
++}
++static qboolean SGGpuSourceEqual( const sg_gpu_source_key_t *a, const sg_gpu_source_key_t *b )
++{
++    /* Both zero-initialized keys require current source generations. The exact
++     * source registry already proved shared pixels; palette/options remain exact.
++     * No hash/name, retired pointer or equal metadata alone proves source bytes. */
++    return SGGpuSourceCurrent(a)&&SGGpuSourceCurrent(b)&&!memcmp(a,b,sizeof(*a));
++}
++
++/* Detached admission registry. Exactly one MiB of fixed palette storage,
++ * bounded scalar metadata, no heap allocation or borrowed texture pointers.
++ * Caller integration must retire these records before source/group recycling. */
++#define SG_GPU_PROOF_RECORDS 1024u
++typedef struct {
++    unsigned int width,height,depth,srcWidth,srcHeight,target,format,flags,encode,numMips;
++    size_t bytes;
++    rgba_t fog;
++}sg_gpu_uploaded_meta_t;
++typedef struct {
++    sg_gpu_source_key_t key;
++    sg_gpu_uploaded_meta_t uploaded;
++    sg_gpu_handle_t group;
++    unsigned int next,nextFree;
++}sg_gpu_proof_t;
++static sg_gpu_proof_t sg_gpu_proofs[SG_GPU_PROOF_RECORDS];
++static unsigned int sg_gpu_proof_heads[SG_STUDIO_BLOB_RECORDS],sg_gpu_proof_by_group[MAX_TEXTURES];
++static struct {unsigned int ready,freeHead,live,peak,refusals;}sg_gpu_proof;
++
++static void SGGpuProofInit( void )
++{
++    unsigned int i;
++    if(sg_gpu_proof.ready)return;
++    for(i=0;i<SG_GPU_PROOF_RECORDS;i++)sg_gpu_proofs[i].nextFree=i+2;
++    sg_gpu_proofs[SG_GPU_PROOF_RECORDS-1].nextFree=0;sg_gpu_proof.freeHead=1;sg_gpu_proof.ready=1;
++}
++static qboolean SGGpuProofRemove( unsigned int id )
++{
++    sg_gpu_proof_t *record;
++    unsigned int *link,visited=0;
++    if(!id||id>SG_GPU_PROOF_RECORDS)return false;
++    record=&sg_gpu_proofs[id-1];
++    if(!record->group.id||record->group.id>MAX_TEXTURES||!record->key.blob||record->key.blob>SG_STUDIO_BLOB_RECORDS||
++       sg_gpu_proof_by_group[record->group.id-1]!=id)
++    {gEngfuncs.Host_Error("Invalid studio GPU proof ownership\n");return false;}
++    link=&sg_gpu_proof_heads[record->key.blob-1];
++    while(*link&&*link!=id&&visited++<16)
++    {
++        if(*link>SG_GPU_PROOF_RECORDS){gEngfuncs.Host_Error("Invalid studio GPU proof link\n");return false;}
++        link=&sg_gpu_proofs[*link-1].next;
++    }
++    if(*link!=id){gEngfuncs.Host_Error("Missing studio GPU proof\n");return false;}
++    *link=record->next;sg_gpu_proof_by_group[record->group.id-1]=0;sg_gpu_proof.live--;
++    memset(record,0,sizeof(*record));record->nextFree=sg_gpu_proof.freeHead;sg_gpu_proof.freeHead=id;
++    return true;
++}
++static qboolean SGGpuProofDropGroup( sg_gpu_handle_t group )
++{
++    unsigned int id;
++    if(!group.id||group.id>MAX_TEXTURES)return false;
++    id=sg_gpu_proof_by_group[group.id-1];
++    if(!id)return true;
++    if(id>SG_GPU_PROOF_RECORDS||sg_gpu_proofs[id-1].group.generation!=group.generation)return false;
++    return SGGpuProofRemove(id);
++}
++static void SGGpuProofRetireSource( unsigned int blob )
++{
++    unsigned int id,visited=0;
++    SGGpuSourceRetired(blob);
++    if(!blob||blob>SG_STUDIO_BLOB_RECORDS)return;
++    while((id=sg_gpu_proof_heads[blob-1])!=0)
++    {
++        if(++visited>16||!SGGpuProofRemove(id))
++        {gEngfuncs.Host_Error("Invalid studio GPU source proof retirement\n");return;}
++    }
++}
++static qboolean SGGpuProofPublish( const sg_gpu_source_key_t *key, sg_gpu_handle_t handle, const gl_texture_t *tex )
++{
++    sg_gpu_group_t *group=SGGpuLookup(handle);
++    sg_gpu_proof_t *record;
++    unsigned int id,entry,visited=0;
++    if(!SGGpuSourceCurrent(key)||!group||group->object!=tex->texnum||group->bytes!=tex->size||
++       tex->target!=GL_TEXTURE_2D||!tex->width||!tex->height||tex->depth!=1||!tex->numMips||
++       tex->srcWidth!=key->width||tex->srcHeight!=key->height||sg_gpu_proof_by_group[handle.id-1])
++    {sg_gpu_proof.refusals++;return false;}
++    SGGpuProofInit();
++    for(entry=sg_gpu_proof_heads[key->blob-1];entry;entry=sg_gpu_proofs[entry-1].next)
++    {
++        if(entry>SG_GPU_PROOF_RECORDS||++visited>=16){sg_gpu_proof.refusals++;return false;}
++    }
++    if(!sg_gpu_proof.freeHead){sg_gpu_proof.refusals++;return false;}
++    id=sg_gpu_proof.freeHead;record=&sg_gpu_proofs[id-1];sg_gpu_proof.freeHead=record->nextFree;
++    memset(record,0,sizeof(*record));memcpy(&record->key,key,sizeof(*key));record->group=handle;
++    record->uploaded.width=tex->width;record->uploaded.height=tex->height;record->uploaded.depth=tex->depth;
++    record->uploaded.srcWidth=tex->srcWidth;record->uploaded.srcHeight=tex->srcHeight;
++    record->uploaded.target=tex->target;record->uploaded.format=tex->format;record->uploaded.flags=tex->flags;
++    record->uploaded.encode=tex->encode;record->uploaded.numMips=tex->numMips;record->uploaded.bytes=tex->size;
++    memcpy(record->uploaded.fog,tex->fogParams,sizeof(record->uploaded.fog));
++    record->next=sg_gpu_proof_heads[key->blob-1];sg_gpu_proof_heads[key->blob-1]=id;
++    sg_gpu_proof_by_group[handle.id-1]=id;sg_gpu_proof.live++;
++    if(sg_gpu_proof.live>sg_gpu_proof.peak)sg_gpu_proof.peak=sg_gpu_proof.live;
++    return true;
++}
++static sg_gpu_handle_t SGGpuProofFind( const sg_gpu_source_key_t *key, sg_gpu_uploaded_meta_t *uploaded )
++{
++    unsigned int entry,visited=0;
++    sg_gpu_handle_t empty={0,0};
++    if(!SGGpuSourceCurrent(key))return empty;
++    for(entry=sg_gpu_proof_heads[key->blob-1];entry;entry=sg_gpu_proofs[entry-1].next)
++    {
++        sg_gpu_proof_t *record;
++        sg_gpu_group_t *group;
++        if(entry>SG_GPU_PROOF_RECORDS||++visited>16){sg_gpu_proof.refusals++;return empty;}
++        record=&sg_gpu_proofs[entry-1];group=SGGpuLookup(record->group);
++        if(!group||group->bytes!=record->uploaded.bytes||!SGGpuSourceEqual(key,&record->key))continue;
++        memcpy(uploaded,&record->uploaded,sizeof(*uploaded));return record->group;
++    }
++    return empty;
++}
++static void SGGpuProofResetEmpty( void )
++{
++    unsigned int i;
++    Assert(!sg_gpu_proof.live);
++    for(i=0;i<SG_STUDIO_BLOB_RECORDS;i++)Assert(!sg_gpu_proof_heads[i]);
++    for(i=0;i<MAX_TEXTURES;i++)Assert(!sg_gpu_proof_by_group[i]);
++    for(i=0;i<SG_GPU_PROOF_RECORDS;i++)Assert(!sg_gpu_proofs[i].group.id);
++    sg_gpu_proof.ready=0;sg_gpu_proof.freeHead=0;
++}
++
++/* Private native candidate adapter. Admission only at deferred studio resolve;
++ * all grouped mutations pass a central full-replacement guard. */
++static qboolean sg_gpu_checking,sg_gpu_upload_error;
++static struct {unsigned int hits,misses,uploadErrors,allocationRefusals;}sg_gpu_native;
++static void SGGpuProfile( sg_gpu_upload_profile_t *profile )
++{
++    memset(profile,0,sizeof(*profile));
++    profile->npot=GL_Support(GL_ARB_TEXTURE_NPOT_EXT);
++    profile->maxTextureSize=glConfig.max_2d_texture_size;
++    profile->desktopBits=gpGlobals->desktopBitsPixel;
++    profile->quake=ENGINE_GET_PARM(PARM_QUAKE_COMPATIBLE);
++    profile->multisamples=glConfig.max_multisamples;
++    profile->roundDown=gl_round_down.value;profile->nearest=gl_texture_nearest.value;
++    profile->anisotropy=gl_texture_anisotropy.value;profile->lodBias=gl_texture_lodbias.value;
++}
++static qboolean SGGpuTryJoin( gl_texture_t *tex, const sg_gpu_source_key_t *key )
++{
++    gl_texture_t saved;
++    sg_gpu_uploaded_meta_t meta;
++    sg_gpu_handle_t handle=SGGpuProofFind(key,&meta);
++    if(!handle.id){sg_gpu_native.misses++;return false;}
++    memcpy(&saved,tex,sizeof(saved));
++    tex->width=meta.width;tex->height=meta.height;tex->depth=meta.depth;
++    tex->srcWidth=meta.srcWidth;tex->srcHeight=meta.srcHeight;tex->target=meta.target;
++    tex->format=meta.format;tex->flags=meta.flags;tex->encode=meta.encode;tex->numMips=meta.numMips;tex->size=meta.bytes;
++    memcpy(tex->fogParams,meta.fog,sizeof(meta.fog));
++    if(!SGGpuAdopt(tex,handle)){memcpy(tex,&saved,sizeof(saved));return false;}
++    /* Equivalent to original upload's binding, without pretending to upload. */
++    glState.currentTextures[glState.activeTMU]=tex->texnum;
++    glState.currentTexturesIndex[glState.activeTMU]=tex-gl_textures;
++    pglBindTexture(tex->target,tex->texnum);sg_gpu_native.hits++;
++    return true;
++}
++static qboolean SGGpuReleaseWithProof( gl_texture_t *tex )
++{
++    sg_gpu_handle_t handle=sg_gpu_slots[SGGpuSlot(tex)];
++    sg_gpu_group_t *group=SGGpuLookup(handle);
++    if(group&&group->refs==1&&!SGGpuProofDropGroup(handle))return false;
++    return SGGpuRelease(tex);
++}
++static qboolean SGGpuPrepareUpload( gl_texture_t *tex )
++{
++    sg_gpu_handle_t handle=sg_gpu_slots[SGGpuSlot(tex)];
++    sg_gpu_group_t *group=SGGpuLookup(handle);
++    GLuint fresh=0;
++    unsigned int tries=0;
++    if(!handle.id)return true;
++    if(!glw_state.initialized||!group||group->object!=tex->texnum)return false;
++    if(group->refs>1)
++    {
++        /* Pending GL errors cannot prove a successful fresh allocation. */
++        if(pglGetError()!=GL_NO_ERROR){sg_gpu_native.allocationRefusals++;return false;}
++        do
++        {
++            pglGenTextures(1,&fresh);
++            if(pglGetError()!=GL_NO_ERROR||!fresh||SGGpuObjectKnown(fresh))
++            {
++                if(fresh&&!SGGpuObjectKnown(fresh))pglDeleteTextures(1,&fresh);
++                sg_gpu_native.allocationRefusals++;return false;
++            }
++            if(fresh<SKYBOX_BASE_NUM||fresh>SKYBOX_BASE_NUM+SKYBOX_MAX_SIDES)break;
++            pglDeleteTextures(1,&fresh);fresh=0;
++        }while(++tries<16);
++        if(!fresh){sg_gpu_native.allocationRefusals++;return false;}
++    }
++    if(!SGGpuProofDropGroup(handle)||!SGGpuDetach(tex,fresh))
++    {
++        if(fresh)pglDeleteTextures(1,&fresh);
++        return false;
++    }
++    return true;
++}
++static void SGGpuPublishUploaded( gl_texture_t *tex, const sg_gpu_source_key_t *key )
++{
++    sg_gpu_handle_t handle;
++    if(sg_gpu_upload_error||!SGGpuSourceCurrent(key)){sg_gpu_native.uploadErrors+=sg_gpu_upload_error;return;}
++    handle=SGGpuRegister(tex);
++    if(handle.id&&!SGGpuProofPublish(key,handle,tex))
++        Assert(SGGpuRelease(tex)); /* Keep ordinary physical ownership on fallback. */
++}
++static void SGGpuReport( void )
++{
++#ifdef __EMSCRIPTEN__
++    EM_ASM({
++      window.__sgStudioGpuSharing=({enabled:$0,groups:$1,owners:$2,uniqueBytes:$3,
++        proofs:$4,proofPeak:$5,proofRefusals:$6,hits:$7,misses:$8,uploadErrors:$9,
++        allocationRefusals:$10,staticBytes:$11,paletteCapacityBytes:1048576});
++    },r_studio_gpu_share.value!=0,sg_gpu.groups,sg_gpu.owners,(double)sg_gpu.uniqueBytes,
++      sg_gpu_proof.live,sg_gpu_proof.peak,sg_gpu_proof.refusals,sg_gpu_native.hits,
++      sg_gpu_native.misses,sg_gpu_native.uploadErrors,sg_gpu_native.allocationRefusals,
++      sizeof(sg_gpu_proofs)+sizeof(sg_gpu_proof_heads)+sizeof(sg_gpu_proof_by_group)+sizeof(sg_gpu_proof)+
++      sizeof(sg_gpu_groups)+sizeof(sg_gpu_slots)+sizeof(sg_gpu_buckets)+sizeof(sg_gpu)+
++      sizeof(sg_gpu_source_serials)+sizeof(sg_gpu_source_sequence)+sizeof(sg_gpu_native));
++#endif
++}
++
+ static unsigned int sg_studio_blob_buckets[SG_STUDIO_BLOB_RECORDS];
+ static unsigned int sg_studio_blob_free, sg_studio_blob_ready;
+ static struct
+@@ -150,6 +595,7 @@
+     if(!sg_studio_blob_free||bytes>SG_STUDIO_PENDING_BUDGET-sg_studio_share.uniqueBytes){sg_studio_share.refusals++;return;}
+     entry=sg_studio_blob_free;record=&sg_studio_blobs[entry-1];sg_studio_blob_free=record->next;
+     record->buffer=pic->buffer;record->bytes=bytes;record->rawBytes=pic->size;record->key=key;record->refs=1;
++    SGGpuSourceCreated(entry);
+     record->next=sg_studio_blob_buckets[bucket];sg_studio_blob_buckets[bucket]=entry;
+     tex->studio_shared_blob=entry;sg_studio_share.blobs++;sg_studio_share.owners++;sg_studio_share.uniqueBytes+=bytes;
+     sg_studio_share.peakUniqueBytes=Q_max(sg_studio_share.peakUniqueBytes,sg_studio_share.uniqueBytes);
+@@ -279,7 +725,7 @@
+         while(*link&&*link!=entry&&visited++<SG_STUDIO_BLOB_RECORDS)link=&sg_studio_blobs[*link-1].next;
+         if(*link!=entry){gEngfuncs.Host_Error("Packed-source registry mismatch\n");return 0;}
+     }
+-    if(record->refs==1)SGReuseForget(entry);
++    if(record->refs==1){SGGpuProofRetireSource(entry);SGReuseForget(entry);}
+     *virtualBytes=record->bytes;
+     tex->studio_pending->buffer=NULL;tex->studio_shared_blob=0;sg_studio_share.owners--;
+     if(record->refs>1){record->refs--;sg_studio_share.savedBytes-=record->bytes;return 0;}
+@@ -471,7 +917,10 @@
+ 	}
+ 
+ 	if( glState.currentTextures[tmu] == texture->texnum )
++	{
++		glState.currentTexturesIndex[tmu] = texnum;
+ 		return;
++	}
+ 
+ 	pglBindTexture( texture->target, texture->texnum );
+ 	glState.currentTextures[tmu] = texture->texnum;
+@@ -1488,13 +1937,16 @@
+ */
+ static void GL_CheckTexImageError( gl_texture_t *tex )
+ {
+-	int	err;
++	int	err = GL_NO_ERROR;
+ 
+ 	Assert( tex != NULL );
+ 
+ 	// catch possible errors
+-	if( gl_check_errors.value && ( err = pglGetError()) != GL_NO_ERROR )
+-		gEngfuncs.Con_Printf( S_OPENGL_ERROR "%s while uploading %s [%s]\n", GL_ErrorString( err ), tex->name, GL_TargetToString( tex->target ));
++	if( (gl_check_errors.value || sg_gpu_checking) && ( err = pglGetError()) != GL_NO_ERROR )
++	{
++		if(sg_gpu_checking)sg_gpu_upload_error=true;
++		if(gl_check_errors.value)gEngfuncs.Con_Printf( S_OPENGL_ERROR "%s while uploading %s [%s]\n", GL_ErrorString( err ), tex->name, GL_TargetToString( tex->target ));
++	}
+ }
+ 
+ /*
+@@ -1521,6 +1973,7 @@
+ 	Assert( pic != NULL );
+ 	Assert( tex != NULL );
+ 
++	if(!SGGpuPrepareUpload(tex))return false;
+ 	GL_SetTextureTarget( tex, pic ); // must be first
+ 
+ 	// make sure what target is correct
+@@ -1706,6 +2159,9 @@
+ {
+     rgbdata_t *pic;
+     double started;
++    sg_gpu_source_key_t key;
++    sg_gpu_upload_profile_t profile;
++    qboolean haveKey=false;
+     if( tex->studio_state == SG_STUDIO_FAILED || tex->studio_state == SG_STUDIO_RESOLVING )
+     {
+         gEngfuncs.Host_Error( "Deferred studio texture is failed or reentrant\n" );
+@@ -1715,6 +2171,15 @@
+     started = gEngfuncs.pfnTime();
+     tex->studio_state = SG_STUDIO_RESOLVING;
+     pic = tex->studio_pending;
++    if(r_studio_gpu_share.value && glw_state.initialized)
++    {
++        SGGpuProfile(&profile);haveKey=SGGpuSourceCapture(tex,&profile,&key);
++        if(haveKey && SGGpuTryJoin(tex,&key))
++        {
++            GL_ApplyTextureParams(tex);GL_ReleaseStudioSource(tex);
++            goto sgGpuResolved;
++        }
++    }
+     if( !SGStudioDecodeSource(tex) )
+     {
+         tex->studio_state=SG_STUDIO_FAILED;sg_studio_residency.failures++;
+@@ -1725,8 +2190,10 @@
+     // The pinned indexed decompressor expands storage but leaves size unchanged.
+     // Eligible MDL images are single-layer RGBA after the original conversion.
+     pic->size = (size_t)pic->width * pic->height * 4;
++    sg_gpu_checking=haveKey;sg_gpu_upload_error=haveKey && pglGetError()!=GL_NO_ERROR;
+     if( pic->type != PF_RGBA_32 || !GL_UploadTexture( tex, pic ))
+     {
++        sg_gpu_checking=false;
+         tex->studio_state = SG_STUDIO_FAILED;
+         sg_studio_residency.failures++;
+         GL_ReleaseStudioSource( tex );
+@@ -1736,14 +2203,18 @@
+         return false;
+     }
+     GL_ApplyTextureParams( tex );
++    if(haveKey && pglGetError()!=GL_NO_ERROR)sg_gpu_upload_error=true;
++    sg_gpu_checking=false;
++    if(haveKey)SGGpuPublishUploaded(tex,&key);
+     GL_ReleaseStudioSource( tex );
++sgGpuResolved:
+     tex->studio_state = SG_STUDIO_RESIDENT;
+     sg_studio_residency.residentCount++;
+     sg_studio_residency.realizedTotal++;
+     sg_studio_residency.lastRealizeMs = (gEngfuncs.pfnTime() - started) * 1000;
+     sg_studio_residency.totalRealizeMs += sg_studio_residency.lastRealizeMs;
+     sg_studio_residency.maxRealizeMs = Q_max( sg_studio_residency.maxRealizeMs, sg_studio_residency.lastRealizeMs );
+-    GL_StudioResidencyReport();
++    GL_StudioResidencyReport();SGGpuReport();
+     return true;
+ }
+ 
+@@ -1917,8 +2388,9 @@
+ 	if( tex->original )
+ 		gEngfuncs.FS_FreeImage( tex->original );
+ 
+-	if( glw_state.initialized )
++	if( SGGpuReleaseWithProof( tex ) && glw_state.initialized )
+ 		pglDeleteTextures( 1, &tex->texnum );
++	SGGpuReport();
+ 	memset( tex, 0, sizeof( *tex ));
+ }
+ 
+@@ -1940,6 +2412,7 @@
+ 
+ 	tex = &gl_textures[texnum];
+ 	if( !GL_EnsureStudioTexture( tex )) return;
++	if(sg_gpu_slots[texnum].id&&!SGGpuProofDropGroup(sg_gpu_slots[texnum]))return;
+ 	numSides = FBitSet( tex->flags, TF_CUBEMAP ) ? 6 : 1;
+ 	GL_SetTextureDimensions( tex, width, height, depth );
+ 	tex->size = 0; // recompute now
+@@ -2263,6 +2736,7 @@
+ 	{
+ 		if( tex == NULL )
+ 			gEngfuncs.Host_Error( "%s: couldn't find texture %s for update\n", __func__, name );
++		if(!SGGpuPrepareUpload(tex))return 0;
+ 		SetBits( tex->flags, flags );
+ 	}
+ 	else
+@@ -2275,7 +2749,7 @@
+ 
+ 	if( !GL_UploadTexture( tex, pic ))
+ 	{
+-		memset( tex, 0, sizeof( gl_texture_t ));
++		GL_DeleteTexture(tex);
+ 		return 0;
+ 	}
+ 
+@@ -2860,8 +3334,9 @@
+ 	memset( tr.lightmapTextures, 0, sizeof( tr.lightmapTextures ));
+ 	memset( gl_texturesHashTable, 0, sizeof( gl_texturesHashTable ));
+ 	memset( gl_textures, 0, sizeof( gl_textures ));
++	SGGpuProofResetEmpty();SGGpuResetEmpty();
+ 	gl_numTextures = 0;
+-	GL_StudioResidencyReport();
++	GL_StudioResidencyReport();SGGpuReport();
+ }
+ 
+ void R_TextureReplacementReport( const char *modelname, int gl_texturenum, const char *foundpath )
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -816,6 +816,7 @@
+ extern convar_t	r_studio_texture_defer;
+ extern convar_t r_studio_source_compress;
+ extern convar_t r_studio_source_share;
++extern convar_t r_studio_gpu_share;
+ extern convar_t r_studio_encode_reuse;
+ extern convar_t	r_studio_mesh_compact;
+ void SGStudioMeshArraysReport( void );
+--- a/ref/gl/gl_backend.c
++++ b/ref/gl/gl_backend.c
+@@ -709,7 +709,7 @@
+ 		y = k / base_w * gpGlobals->height / base_h;
+ 
+ 		pglColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
+-		GL_Bind( XASH_TEXTURE0, image->texnum );
++		GL_Bind( XASH_TEXTURE0, i );
+ 
+ 		if( FBitSet( image->flags, TF_DEPTHMAP ) && !FBitSet( image->flags, TF_NOCOMPARE ))
+ 			pglTexParameteri( image->target, GL_TEXTURE_COMPARE_MODE_ARB, GL_NONE );
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -33,6 +33,7 @@
+ CVAR_DEFINE_AUTO( r_static_lightmap_batch, "0", FCVAR_GLCONFIG, "batch static lightmap triangles (experimental)" );
+ CVAR_DEFINE_AUTO( r_base_surface_batch, "0", FCVAR_GLCONFIG, "batch owned opaque base surfaces" );
+ CVAR_DEFINE_AUTO( r_studio_texture_defer, "0", FCVAR_GLCONFIG, "defer eligible MDL texture uploads until first use (experimental)" );
++CVAR_DEFINE_AUTO( r_studio_gpu_share, "0", FCVAR_GLCONFIG, "share exact deferred studio GPU objects (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_source_share, "0", FCVAR_GLCONFIG, "share exact owned packed studio sources (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_encode_reuse, "0", FCVAR_GLCONFIG, "reuse exact live encoded studio sources before compression (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_source_compress, "0", FCVAR_GLCONFIG, "losslessly compress owned pending studio sources (experimental)" );
+@@ -1163,6 +1164,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_texture_defer );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_compress );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_share );
++	gEngfuncs.Cvar_RegisterVariable( &r_studio_gpu_share );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_encode_reuse );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_compact );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_cull );

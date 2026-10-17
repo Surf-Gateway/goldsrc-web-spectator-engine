@@ -1,0 +1,14 @@
+--- a/cl_dll/hud_spectator.cpp
++++ b/cl_dll/hud_spectator.cpp
+@@ -1791,7 +1791,10 @@
+ 		float now = gEngfuncs.GetClientTime();
+ 		g_iUser2 = 0;
+ 		// Bound empty-server searches; a rewound clock resets the retry window.
+-		if( now < lastSearch || now - lastSearch >= 0.5f )
++		// A newly available pose need not wait for the empty-server retry period.
++		if( now < lastSearch || now - lastSearch >= 0.5f ||
++			( sgWebPlayersLow && sgWebPlayersLow->value > 0 ) ||
++			( sgWebPlayersHigh && sgWebPlayersHigh->value > 0 ))
+ 		{
+ 			lastSearch = now;
+ 			FindNextPlayer( false );

@@ -1,0 +1,12 @@
+--- a/ref/gl/gl_rsurf.c
++++ b/ref/gl/gl_rsurf.c
+@@ -1022,6 +1022,8 @@
+ 			GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[i] );
+ 
+-			if( r_static_lightmap_batch.value )
++			// Keep alpha/translucent entity passes on the original submission path.
++			if( r_static_lightmap_batch.value && RI.currententity &&
++				RI.currententity->curstate.rendermode == kRenderNormal )
+ 				R_DrawStaticLightmapBatch( gl_lms.lightmap_surfaces[i] );
+ 			else
+ 			{

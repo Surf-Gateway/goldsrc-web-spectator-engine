@@ -1,0 +1,70 @@
+diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
+index a0661ad..eb6362c 100644
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -827,6 +827,7 @@ extern convar_t r_studio_client_states;
+ extern convar_t r_studio_constant_light;
+ extern convar_t r_studio_zero_local_light;
+ extern convar_t r_studio_bounds_bits;
++extern convar_t r_studio_bounds_unique;
+ #ifdef __EMSCRIPTEN__
+ extern convar_t r_mip_rgba_pairs;
+ #endif
+diff --git a/ref/gl/gl_opengl.c b/ref/gl/gl_opengl.c
+index 0418aec..767e40c 100644
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -43,6 +43,7 @@ CVAR_DEFINE_AUTO( r_studio_mesh_pvs, "0", FCVAR_GLCONFIG, "static studio mesh PV
+ CVAR_DEFINE_AUTO( r_studio_clip_cache, "0", FCVAR_GLCONFIG, "reuse exact clip masks within one submodel draw (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_client_states, "0", FCVAR_GLCONFIG, "hold studio vertex/color client state per submodel (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_constant_light, "0", FCVAR_GLCONFIG, "reuse original constant studio lighting per mesh" );
++CVAR_DEFINE_AUTO( r_studio_bounds_unique, "0", FCVAR_GLCONFIG, "selective draw-local studio bounds membership (candidate)" );
+ CVAR_DEFINE_AUTO( r_studio_bounds_bits, "0", FCVAR_GLCONFIG, "exact binary32 studio coordinate validation (candidate)" );
+ CVAR_DEFINE_AUTO( r_studio_zero_local_light, "0", FCVAR_GLCONFIG, "exact zero-local-light studio vertex setup" );
+ #ifdef __EMSCRIPTEN__
+@@ -1186,6 +1187,7 @@ static void GL_InitCommands( void )
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_constant_light );
+     gEngfuncs.Cvar_RegisterVariable( &r_studio_zero_local_light );
+     gEngfuncs.Cvar_RegisterVariable( &r_studio_bounds_bits );
++    gEngfuncs.Cvar_RegisterVariable( &r_studio_bounds_unique );
+ #ifdef __EMSCRIPTEN__
+     gEngfuncs.Cvar_RegisterVariable( &r_mip_rgba_pairs );
+ #endif
+diff --git a/ref/gl/gl_studio.c b/ref/gl/gl_studio.c
+index 1c388ec..53f6b6b 100644
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -2504,6 +2504,8 @@ static qboolean SGStudioMeshOutside( const mstudiomesh_t *mesh, float shellscale
+     int count, i, axis;
+     qboolean haveVertex = false;
+     qboolean sgUseBoundsBits = false;
++    qboolean useUnique = false;
++    uint32_t seen[(MAXSTUDIOVERTS+31)/32];
+     if( !r_studio_mesh_cull.value ) return false;
+     sg_mesh_cull.checked++;
+     if( r_nocull.value || !RP_NORMALPASS() || !RI.drawWorld || RI.currententity == tr.viewent ||
+@@ -2521,6 +2523,11 @@ static qboolean SGStudioMeshOutside( const mstudiomesh_t *mesh, float shellscale
+ #ifdef __EMSCRIPTEN__
+     sgUseBoundsBits = r_studio_bounds_bits.value==1;
+ #endif
++#ifdef __EMSCRIPTEN__
++    useUnique=r_studio_bounds_unique.value==1 && m_pSubModel->numverts>=64 &&
++        mesh->numtris >= (m_pSubModel->numverts*3+1)/2;
++#endif
++    if(useUnique)memset(seen,0,((m_pSubModel->numverts+31)/32)*sizeof(seen[0]));
+     offset = mesh->triindex;
+     ClearBounds( mins, maxs );
+     for( ;; )
+@@ -2538,6 +2545,12 @@ static qboolean SGStudioMeshOutside( const mstudiomesh_t *mesh, float shellscale
+             int index = cmd[0];
+             const float *v;
+             if( index < 0 || index >= m_pSubModel->numverts ) goto unsupported;
++            if(useUnique){
++                uint32_t mask=UINT32_C(1)<<(index&31);
++                uint32_t *word=&seen[(unsigned)index>>5];
++                if(*word&mask)continue;
++                *word|=mask;
++            }
+             v = g_studio.verts[index];
+             if( sgUseBoundsBits )
+             {

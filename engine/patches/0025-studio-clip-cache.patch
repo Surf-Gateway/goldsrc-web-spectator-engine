@@ -1,0 +1,155 @@
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -2287,6 +2287,67 @@
+     }
+     return mask;
+ }
++/* Private bounded metadata: no model pointers, allocations or cross-draw hits. */
++#define SG_CLIP_CACHE_METADATA_LIMIT (280u*1024u)
++static struct {
++    byte valid[MAXSTUDIOVERTS];
++    unsigned int masks[MAXSTUDIOVERTS];
++    vec3_t points[MAXSTUDIOVERTS];
++    gl_frustum_t frustum;
++    qboolean active, prepared;
++} sgClipRecords;
++typedef char sg_clip_cache_metadata_bound[(sizeof(sgClipRecords)<=SG_CLIP_CACHE_METADATA_LIMIT)?1:-1];
++static struct { double calls, reused, computed, pointChanges, frustumChanges, preparedDraws, draws, clearedBytes; } sgClipStats;
++static void SGClipCacheBegin( void )
++{
++    sgClipRecords.active=r_studio_mesh_cull.value&&r_studio_clip_cache.value;
++    sgClipRecords.prepared=false;
++    if(sgClipRecords.active)sgClipStats.draws++;
++}
++static void SGClipCacheEnd( void )
++{
++    sgClipRecords.active=false;sgClipRecords.prepared=false;
++}
++static void SGClipCacheSyncFrustum( void )
++{
++    if(!sgClipRecords.active||!r_studio_clip_cache.value)return;
++    if(!sgClipRecords.prepared||memcmp(&sgClipRecords.frustum,&RI.frustum,sizeof(RI.frustum)))
++    {
++        if(sgClipRecords.prepared)sgClipStats.frustumChanges++;
++        else sgClipStats.preparedDraws++;
++        memset(sgClipRecords.valid,0,sizeof(sgClipRecords.valid));
++        memcpy(&sgClipRecords.frustum,&RI.frustum,sizeof(RI.frustum));
++        sgClipRecords.prepared=true;sgClipStats.clearedBytes+=sizeof(sgClipRecords.valid);
++    }
++}
++static unsigned int SGClipCachedMask( unsigned int index )
++{
++    const float *point;
++    unsigned int mask;
++    /* Original command validation precedes this private call. */
++    ASSERT(index<MAXSTUDIOVERTS);
++    point=g_studio.verts[index];
++    if(!sgClipRecords.active||!sgClipRecords.prepared||!r_studio_clip_cache.value)
++        return SGStudioVertexClipMask(point);
++    sgClipStats.calls++;
++    if(sgClipRecords.valid[index]&&!memcmp(sgClipRecords.points[index],point,sizeof(vec3_t)))
++    {sgClipStats.reused++;return sgClipRecords.masks[index];}
++    if(sgClipRecords.valid[index])sgClipStats.pointChanges++;
++    mask=SGStudioVertexClipMask(point);sgClipStats.computed++;
++    memcpy(sgClipRecords.points[index],point,sizeof(vec3_t));
++    sgClipRecords.masks[index]=mask;sgClipRecords.valid[index]=1;
++    return mask;
++}
++void SGClipCacheReport( void )
++{
++#ifdef __EMSCRIPTEN__
++    EM_ASM({const s=Module["sgStudioClipCache"]||(Module["sgStudioClipCache"]={});s.enabled=Boolean($0);s.calls=$1;s.reused=$2;s.computed=$3;s.pointChanges=$4;s.frustumChanges=$5;s.preparedDraws=$6;s.draws=$7;s.clearedBytes=$8;s.maxRecords=$9;s.metadataBytes=$10;s.maxMetadataBytes=$11;},
++        r_studio_mesh_cull.value&&r_studio_clip_cache.value,sgClipStats.calls,sgClipStats.reused,sgClipStats.computed,
++        sgClipStats.pointChanges,sgClipStats.frustumChanges,sgClipStats.preparedDraws,sgClipStats.draws,
++        sgClipStats.clearedBytes,MAXSTUDIOVERTS,(double)sizeof(sgClipRecords),SG_CLIP_CACHE_METADATA_LIMIT);
++#endif
++}
++
+ static qboolean SGStudioMeshOutside( const mstudiomesh_t *mesh, float shellscale )
+ {
+     const studiohdr_t *hdr = m_pStudioHeader;
+@@ -2342,6 +2403,7 @@
+     if( R_CullBox( mins, maxs )) { sg_mesh_cull.culled++; return true; }
+     // A large union box can intersect the view although its separated triangles
+     // cannot. Keep the complete original draw if any triangle might survive.
++    SGClipCacheSyncFrustum();
+     offset = mesh->triindex;
+     for( ;; )
+     {
+@@ -2352,11 +2414,11 @@
+         if( !count ) break;
+         fan = count < 0;
+         if( fan ) count = -count;
+-        a = SGStudioVertexClipMask( g_studio.verts[cmd[0]] );
+-        b = SGStudioVertexClipMask( g_studio.verts[cmd[4]] );
++        a = SGClipCachedMask(cmd[0]);
++        b = SGClipCachedMask(cmd[4]);
+         for( i = 2; i < count; i++ )
+         {
+-            c = SGStudioVertexClipMask( g_studio.verts[cmd[i*4]] );
++            c = SGClipCachedMask(cmd[i*4]);
+             if( !(a & b & c) ) { sg_mesh_cull.passed++; return false; }
+             if( !fan ) a = b;
+             b = c;
+@@ -2386,6 +2448,7 @@
+ 
+ 
+ 	g_studio.numverts = g_studio.numelems = 0;
++    SGClipCacheBegin();
+ 
+ 	m_skinnum = RI.currententity->curstate.skin;
+ 	ptexture = (mstudiotexture_t *)((byte *)m_pStudioHeader + m_pStudioHeader->textureindex);
+@@ -2568,6 +2631,7 @@
+ 		r_stats.c_studio_polys += pmesh->numtris;
+ 		tr.blend = oldblend;
+ 	}
++    SGClipCacheEnd();
+ }
+ 
+ /*
+--- a/ref/gl/gl_rmain.c
++++ b/ref/gl/gl_rmain.c
+@@ -14,6 +14,7 @@
+ */
+ 
+ #include "gl_local.h"
++extern void SGClipCacheReport( void );
+ #include "xash3d_mathlib.h"
+ #include "library.h"
+ #include "beamdef.h"
+@@ -1153,6 +1154,7 @@
+ 	tr.realframecount++; // right called after viewmodel events
+ 	R_RenderScene();
+ 	SGStudioMeshCullReport();
++    SGClipCacheReport();
+ 	SGStudioMeshArraysReport();
+ 
+ 	return;
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -818,6 +818,7 @@
+ extern convar_t	r_studio_mesh_compact;
+ void SGStudioMeshArraysReport( void );
+ extern convar_t	r_studio_mesh_cull;
++extern convar_t	r_studio_clip_cache;
+ void SGStudioMeshCullReport( void );
+ extern convar_t	r_vbo;
+ extern convar_t	r_vbo_dlightmode;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -36,6 +36,7 @@
+ CVAR_DEFINE_AUTO( r_studio_source_compress, "0", FCVAR_GLCONFIG, "losslessly compress owned pending studio sources (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_mesh_compact, "0", FCVAR_GLCONFIG, "submit only current studio mesh arrays" );
+ CVAR_DEFINE_AUTO( r_studio_mesh_cull, "0", FCVAR_GLCONFIG, "cull off-screen classic static studio meshes (experimental)" );
++CVAR_DEFINE_AUTO( r_studio_clip_cache, "0", FCVAR_GLCONFIG, "reuse exact clip masks within one submodel draw (experimental)" );
+ CVAR_DEFINE( r_vbo, "gl_vbo", "0", FCVAR_GLCONFIG, "draw world using VBO (known to be glitchy)" );
+ CVAR_DEFINE( r_vbo_detail, "gl_vbo_detail", "0", FCVAR_GLCONFIG, "detail vbo mode (0: disable, 1: multipass, 2: singlepass, broken decal dlights)" );
+ CVAR_DEFINE( r_vbo_dlightmode, "gl_vbo_dlightmode", "1", FCVAR_GLCONFIG, "vbo dlight rendering mode (0-1)" );
+@@ -1157,6 +1158,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_share );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_compact );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_cull );
++	gEngfuncs.Cvar_RegisterVariable( &r_studio_clip_cache );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_dlightmode );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_overbrightmode );

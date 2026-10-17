@@ -1,0 +1,30 @@
+--- a/ref/gl/gl2_shim/gl2_shim.c
++++ b/ref/gl/gl2_shim/gl2_shim.c
+@@ -628,7 +628,7 @@
+ 		{
+ 			if( !gl2wrap_config.incremental && gl2wrap_config.vao_mandatory )
+ 			{
+-				gl2wrap.attrbufobj[i] = malloc( gl2wrap_config.cycle_buffers * 4 );
++				gl2wrap.attrbufobj[i] = Mem_Calloc( r_temppool, gl2wrap_config.cycle_buffers * sizeof( GLuint ));
+ 				pglGenBuffersARB( gl2wrap_config.cycle_buffers, gl2wrap.attrbufobj[i] );
+ 				if( gl2wrap_config.supports_mapbuffer )
+ 				{
+@@ -1531,6 +1531,18 @@
+ 
+ static void GL2_FreeArrays( void )
+ {
++	int i;
++
++	// Each fallback ring owns GL objects and a malloc-backed name array.
++	// Release both before clearing the pointer/ownership table.
++	for( i = 0; i < GL2_ATTR_MAX; i++ )
++	{
++		if( gl2wrap_arrays.ptr[i].vbo_fb )
++		{
++			pglDeleteBuffersARB( gl2wrap_config.cycle_buffers, gl2wrap_arrays.ptr[i].vbo_fb );
++			free( gl2wrap_arrays.ptr[i].vbo_fb );
++		}
++	}
+ 	if( gl2wrap_arrays.vao_dynamic )
+ 		pglDeleteVertexArrays( 1, &gl2wrap_arrays.vao_dynamic );
+ 	if( gl2wrap_arrays.stream_pointer )

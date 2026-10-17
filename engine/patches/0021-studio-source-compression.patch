@@ -1,0 +1,197 @@
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -126,6 +126,8 @@
+ 	rgbdata_t		*original;	// keep original image
+ 	rgbdata_t		*studio_pending; // owned indexed MDL image, independent of model cache
+ 	size_t		studio_pending_bytes;
++	size_t studio_pending_logical_bytes, studio_codec_bytes;
++	byte *studio_codec_scratch;
+ 	int		studio_state;
+ 
+ 	// debug info
+@@ -810,6 +812,7 @@
+ extern convar_t	r_traceglow;
+ extern convar_t	r_static_lightmap_batch;
+ extern convar_t	r_studio_texture_defer;
++extern convar_t r_studio_source_compress;
+ extern convar_t	r_studio_mesh_cull;
+ void SGStudioMeshCullReport( void );
+ extern convar_t	r_vbo;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -32,6 +32,7 @@
+ CVAR_DEFINE_AUTO( gl_round_down, "2", FCVAR_GLCONFIG|FCVAR_READ_ONLY, "round texture sizes to nearest POT value" );
+ CVAR_DEFINE_AUTO( r_static_lightmap_batch, "0", FCVAR_GLCONFIG, "batch static lightmap triangles (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_texture_defer, "0", FCVAR_GLCONFIG, "defer eligible MDL texture uploads until first use (experimental)" );
++CVAR_DEFINE_AUTO( r_studio_source_compress, "0", FCVAR_GLCONFIG, "losslessly compress owned pending studio sources (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_mesh_cull, "0", FCVAR_GLCONFIG, "cull off-screen classic static studio meshes (experimental)" );
+ CVAR_DEFINE( r_vbo, "gl_vbo", "0", FCVAR_GLCONFIG, "draw world using VBO (known to be glitchy)" );
+ CVAR_DEFINE( r_vbo_detail, "gl_vbo_detail", "0", FCVAR_GLCONFIG, "detail vbo mode (0: disable, 1: multipass, 2: singlepass, broken decal dlights)" );
+@@ -1150,6 +1151,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_shadows );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_static_lightmap_batch );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_texture_defer );
++	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_compress );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_cull );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_dlightmode );
+--- a/ref/gl/gl_image.c
++++ b/ref/gl/gl_image.c
+@@ -16,6 +16,7 @@
+ #include <stdarg.h>
+ #include "gl_local.h"
+ #include "crclib.h"
++#include "miniz.h"
+ #ifdef __EMSCRIPTEN__
+ #include <emscripten.h>
+ #endif
+@@ -31,7 +32,7 @@
+ #define SG_STUDIO_PENDING_BUDGET (256u * 1024u * 1024u)
+ static struct
+ {
+-    size_t pendingBytes, peakPendingBytes;
++    size_t pendingBytes, peakPendingBytes, logicalPendingBytes;
+     unsigned int pendingCount, residentCount, reservedTotal, realizedTotal, failures;
+     double lastRealizeMs, maxRealizeMs, totalRealizeMs;
+ } sg_studio_residency;
+@@ -45,18 +46,96 @@
+         const s = Module["sgStudioResidency"] ??= {};
+         s.pendingBytes=$0; s.peakPendingBytes=$1; s.pendingCount=$2; s.residentCount=$3;
+         s.reservedTotal=$4; s.realizedTotal=$5; s.failures=$6; s.pendingBudgetBytes=$7;
+-        s.lastRealizeMs=$8; s.maxRealizeMs=$9; s.totalRealizeMs=$10;
++        s.lastRealizeMs=$8; s.maxRealizeMs=$9; s.totalRealizeMs=$10; s.logicalPendingBytes=$11;
+     }, (double)sg_studio_residency.pendingBytes, (double)sg_studio_residency.peakPendingBytes,
+        sg_studio_residency.pendingCount, sg_studio_residency.residentCount,
+        sg_studio_residency.reservedTotal, sg_studio_residency.realizedTotal,
+        sg_studio_residency.failures, SG_STUDIO_PENDING_BUDGET,
+-       sg_studio_residency.lastRealizeMs, sg_studio_residency.maxRealizeMs, sg_studio_residency.totalRealizeMs);
++       sg_studio_residency.lastRealizeMs, sg_studio_residency.maxRealizeMs, sg_studio_residency.totalRealizeMs, (double)sg_studio_residency.logicalPendingBytes);
+ #endif
+ }
+ 
++
++static struct
++{
++    unsigned int attempts, compressed, fallback, decoded, decodeFailures;
++    size_t savedTotalBytes;
++    double encodeMs, decodeMs, maxEncodeMs, maxDecodeMs;
++} sg_studio_codec;
++static void SGStudioCodecReport( void )
++{
++#ifdef __EMSCRIPTEN__
++    if( !r_studio_source_compress.value && !sg_studio_codec.attempts ) return;
++    EM_ASM({
++        const s = Module["sgStudioCodec"] ??= {};
++        s.attempts=$0;s.compressed=$1;s.fallback=$2;s.decoded=$3;s.decodeFailures=$4;
++        s.savedTotalBytes=$5;s.encodeMs=$6;s.decodeMs=$7;s.maxEncodeMs=$8;s.maxDecodeMs=$9;
++    }, sg_studio_codec.attempts,sg_studio_codec.compressed,sg_studio_codec.fallback,
++        sg_studio_codec.decoded,sg_studio_codec.decodeFailures,(double)sg_studio_codec.savedTotalBytes,
++        sg_studio_codec.encodeMs,sg_studio_codec.decodeMs,sg_studio_codec.maxEncodeMs,sg_studio_codec.maxDecodeMs);
++#endif
++}
++static void SGStudioCodecScratchFree( gl_texture_t *tex )
++{
++    if( tex->studio_codec_scratch ) gEngfuncs._Mem_Free(tex->studio_codec_scratch,__FILE__,__LINE__);
++    tex->studio_codec_scratch=NULL;
++}
++static void SGStudioCompressSource( gl_texture_t *tex )
++{
++    rgbdata_t *pic=tex->studio_pending;
++    mz_ulong packed,raw;
++    byte *owned;
++    double started,elapsed;
++    int result;
++    if( !r_studio_source_compress.value ) return;
++    sg_studio_codec.attempts++;
++    if( !pic || pic->size<4096 || pic->size>4u*1024u*1024u ||
++        pic->type!=PF_INDEXED_32 || pic->size!=(size_t)pic->width*pic->height ) goto fallback;
++    raw=pic->size;packed=mz_compressBound(raw);
++    tex->studio_codec_scratch=gEngfuncs._Mem_Alloc(r_temppool,packed,false,__FILE__,__LINE__);
++    started=gEngfuncs.pfnTime();
++    result=mz_compress2(tex->studio_codec_scratch,&packed,pic->buffer,raw,1);
++    elapsed=(gEngfuncs.pfnTime()-started)*1000;
++    sg_studio_codec.encodeMs+=elapsed;sg_studio_codec.maxEncodeMs=Q_max(sg_studio_codec.maxEncodeMs,elapsed);
++    if( result!=MZ_OK || packed+64>=raw ) goto fallback;
++    owned=gEngfuncs._Mem_Alloc(r_temppool,packed,false,__FILE__,__LINE__);
++    memcpy(owned,tex->studio_codec_scratch,packed);
++    gEngfuncs._Mem_Free(pic->buffer,__FILE__,__LINE__);pic->buffer=owned;
++    tex->studio_codec_bytes=packed;
++    tex->studio_pending_bytes-=raw-packed;sg_studio_residency.pendingBytes-=raw-packed;
++    sg_studio_codec.savedTotalBytes+=raw-packed;sg_studio_codec.compressed++;
++    SGStudioCodecScratchFree(tex);SGStudioCodecReport();return;
++fallback:
++    sg_studio_codec.fallback++;SGStudioCodecScratchFree(tex);SGStudioCodecReport();
++}
++static qboolean SGStudioDecodeSource( gl_texture_t *tex )
++{
++    rgbdata_t *pic=tex->studio_pending;
++    mz_ulong restored;
++    double started,elapsed;
++    int result;
++    if( !tex->studio_codec_bytes ) return true;
++    restored=pic->size;
++    tex->studio_codec_scratch=gEngfuncs._Mem_Alloc(r_temppool,restored,false,__FILE__,__LINE__);
++    started=gEngfuncs.pfnTime();
++    result=mz_uncompress(tex->studio_codec_scratch,&restored,pic->buffer,tex->studio_codec_bytes);
++    elapsed=(gEngfuncs.pfnTime()-started)*1000;
++    sg_studio_codec.decodeMs+=elapsed;sg_studio_codec.maxDecodeMs=Q_max(sg_studio_codec.maxDecodeMs,elapsed);
++    if( result!=MZ_OK || restored!=pic->size )
++    { sg_studio_codec.decodeFailures++;SGStudioCodecReport();return false; }
++    gEngfuncs._Mem_Free(pic->buffer,__FILE__,__LINE__);pic->buffer=tex->studio_codec_scratch;
++    tex->studio_codec_scratch=NULL;
++    tex->studio_pending_bytes+=restored-tex->studio_codec_bytes;
++    sg_studio_residency.pendingBytes+=restored-tex->studio_codec_bytes;
++    tex->studio_codec_bytes=0;sg_studio_codec.decoded++;SGStudioCodecReport();return true;
++}
++
+ static void GL_ReleaseStudioSource( gl_texture_t *tex )
+ {
++    SGStudioCodecScratchFree(tex);
+     if( !tex->studio_pending ) return;
++    sg_studio_residency.logicalPendingBytes-=tex->studio_pending_logical_bytes;
++    tex->studio_pending_logical_bytes=tex->studio_codec_bytes=0;
+     sg_studio_residency.pendingBytes -= tex->studio_pending_bytes;
+     sg_studio_residency.pendingCount--;
+     gEngfuncs.FS_FreeImage( tex->studio_pending );
+@@ -1401,6 +1480,12 @@
+     started = gEngfuncs.pfnTime();
+     tex->studio_state = SG_STUDIO_RESOLVING;
+     pic = tex->studio_pending;
++    if( !SGStudioDecodeSource(tex) )
++    {
++        tex->studio_state=SG_STUDIO_FAILED;sg_studio_residency.failures++;
++        GL_ReleaseStudioSource(tex);GL_StudioResidencyReport();
++        gEngfuncs.Host_Error("Deferred studio source decode failed\n");return false;
++    }
+     GL_ProcessImage( tex, pic );
+     // The pinned indexed decompressor expands storage but leaves size unchanged.
+     // Eligible MDL images are single-layer RGBA after the original conversion.
+@@ -1732,7 +1817,7 @@
+         return result;
+     }
+     bytes = pic->size + 1024; // owned indexed pixels and 32-bit palette
+-    if( bytes > SG_STUDIO_PENDING_BUDGET - sg_studio_residency.pendingBytes )
++    if( bytes > SG_STUDIO_PENDING_BUDGET - sg_studio_residency.logicalPendingBytes )
+     {
+         gEngfuncs.FS_FreeImage( pic );
+         gEngfuncs.Host_Error( "Deferred studio texture source budget exceeded\n" );
+@@ -1747,9 +1832,10 @@
+     }
+     tex = GL_AllocTexture( name, flags );
+     tex->studio_pending = pic;
+-    tex->studio_pending_bytes = bytes;
++    tex->studio_pending_bytes = tex->studio_pending_logical_bytes = bytes;
+     tex->studio_state = SG_STUDIO_PENDING;
+     sg_studio_residency.pendingBytes += bytes;
++    sg_studio_residency.logicalPendingBytes += bytes;
+     sg_studio_residency.peakPendingBytes = Q_max( sg_studio_residency.peakPendingBytes, sg_studio_residency.pendingBytes );
+     sg_studio_residency.pendingCount++;
+     sg_studio_residency.reservedTotal++;
+@@ -1759,6 +1845,7 @@
+     GL_SetTextureDimensions( tex, pic->width, pic->height, pic->depth );
+     GL_SetTextureFormat( tex, PF_RGBA_32, pic->flags );
+     tex->numMips = GL_CalcMipmapCount( tex, true );
++    SGStudioCompressSource(tex);
+     // size remains zero until real upload. Metadata queries do not realize.
+     return tex - gl_textures;
+ }

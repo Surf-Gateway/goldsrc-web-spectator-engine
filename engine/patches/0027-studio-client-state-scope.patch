@@ -1,0 +1,171 @@
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -2221,14 +2221,74 @@
+ #endif
+ }
+ 
++/* Candidate: vertex/color array state only; original per-mesh UV state remains. */
++static struct { qboolean active,vertex,color; } sgClientScope;
++static struct {
++    double scopes,draws,outsideDraws,enableCalls,disableCalls,reusedEnables,heldDisables,reconciledColors,nestedFallbacks,originalCalls,abortedScopes;
++} sgClientScopeStats;
++static void SGStudioClientScopeEnd( void )
++{
++    if(!sgClientScope.active)return;
++    if(sgClientScope.vertex){pglDisableClientState(GL_VERTEX_ARRAY);sgClientScopeStats.disableCalls++;}
++    if(sgClientScope.color){pglDisableClientState(GL_COLOR_ARRAY);sgClientScopeStats.disableCalls++;}
++    memset(&sgClientScope,0,sizeof(sgClientScope));
++}
++/* Recover only our held states before 2D/error UI after a native frame abort. */
++void SGStudioClientScopeReset( void )
++{
++    if(sgClientScope.active){sgClientScopeStats.abortedScopes++;SGStudioClientScopeEnd();}
++}
++static void SGStudioClientScopeBegin( void )
++{
++    if(sgClientScope.active)
++    {sgClientScopeStats.nestedFallbacks++;SGStudioClientScopeEnd();return;}
++    sgClientScope.active=r_studio_client_states.value&&r_studio_drawelements.value;
++    sgClientScope.vertex=sgClientScope.color=false;
++    if(sgClientScope.active)sgClientScopeStats.scopes++;
++}
++static void SGStudioClientDrawBegin( void )
++{
++    sgClientScopeStats.originalCalls+=(g_nForceFaceFlags&STUDIO_NF_CHROME)?2:4;
++    if(!sgClientScope.active){sgClientScopeStats.outsideDraws++;return;}
++    sgClientScopeStats.draws++;
++    /* The original force-chrome draw omits color calls. A preceding held state
++       must already be disabled, just as after the original preceding draw. */
++    if((g_nForceFaceFlags&STUDIO_NF_CHROME)&&sgClientScope.color)
++    {pglDisableClientState(GL_COLOR_ARRAY);sgClientScope.color=false;sgClientScopeStats.disableCalls++;sgClientScopeStats.reconciledColors++;}
++}
++static void SGStudioClientEnable( GLenum state )
++{
++    qboolean *owned=state==GL_VERTEX_ARRAY?&sgClientScope.vertex:state==GL_COLOR_ARRAY?&sgClientScope.color:NULL;
++    if(sgClientScope.active&&owned)
++    {if(*owned){sgClientScopeStats.reusedEnables++;return;}*owned=true;}
++    pglEnableClientState(state);sgClientScopeStats.enableCalls++;
++}
++static void SGStudioClientDisable( GLenum state )
++{
++    if(sgClientScope.active&&(state==GL_VERTEX_ARRAY||state==GL_COLOR_ARRAY))
++    {sgClientScopeStats.heldDisables++;return;}
++    pglDisableClientState(state);sgClientScopeStats.disableCalls++;
++}
++void SGStudioClientScopeReport( void )
++{
++#ifdef __EMSCRIPTEN__
++    EM_ASM({const s=Module["sgStudioClientStates"]||(Module["sgStudioClientStates"]={});s.enabled=Boolean($0);s.active=Boolean($1);s.scopes=$2;s.draws=$3;s.outsideDraws=$4;s.enableCalls=$5;s.disableCalls=$6;s.reusedEnables=$7;s.heldDisables=$8;s.reconciledColors=$9;s.nestedFallbacks=$10;s.originalCalls=$11;s.abortedScopes=$12;s.metadataBytes=$13;},
++        r_studio_client_states.value&&r_studio_drawelements.value,sgClientScope.active,
++        sgClientScopeStats.scopes,sgClientScopeStats.draws,sgClientScopeStats.outsideDraws,sgClientScopeStats.enableCalls,sgClientScopeStats.disableCalls,
++        sgClientScopeStats.reusedEnables,sgClientScopeStats.heldDisables,sgClientScopeStats.reconciledColors,sgClientScopeStats.nestedFallbacks,sgClientScopeStats.originalCalls,sgClientScopeStats.abortedScopes,
++        (double)(sizeof(sgClientScope)+sizeof(sgClientScopeStats)));
++#endif
++}
++
+ static void R_StudioDrawArrays( uint startverts, uint startelems )
+ {
++    SGStudioClientDrawBegin();
+     sg_mesh_arrays.draws++;
+     sg_mesh_arrays.compactDraws += r_studio_mesh_compact.value != 0;
+     sg_mesh_arrays.submittedVertices += g_studio.numverts;
+     sg_mesh_arrays.usedVertices += g_studio.numverts - startverts;
+     sg_mesh_arrays.indices += g_studio.numelems - startelems;
+-	pglEnableClientState( GL_VERTEX_ARRAY );
++	SGStudioClientEnable( GL_VERTEX_ARRAY );
+ 	pglVertexPointer( 3, GL_FLOAT, 12, g_studio.arrayverts );
+ 
+ 	pglEnableClientState( GL_TEXTURE_COORD_ARRAY );
+@@ -2236,7 +2296,7 @@
+ 
+ 	if( !( g_nForceFaceFlags & STUDIO_NF_CHROME ) )
+ 	{
+-		pglEnableClientState( GL_COLOR_ARRAY );
++		SGStudioClientEnable( GL_COLOR_ARRAY );
+ 		pglColorPointer( 4, GL_UNSIGNED_BYTE, 0, g_studio.arraycolor );
+ 	}
+ 
+@@ -2247,10 +2307,10 @@
+ 	else
+ #endif
+ 		pglDrawElements( GL_TRIANGLES, g_studio.numelems - startelems, GL_UNSIGNED_SHORT, &g_studio.arrayelems[startelems] );
+-	pglDisableClientState( GL_VERTEX_ARRAY );
++	SGStudioClientDisable( GL_VERTEX_ARRAY );
+ 	pglDisableClientState( GL_TEXTURE_COORD_ARRAY );
+ 	if( !( g_nForceFaceFlags & STUDIO_NF_CHROME ) )
+-		pglDisableClientState( GL_COLOR_ARRAY );
++		SGStudioClientDisable( GL_COLOR_ARRAY );
+ }
+ 
+ /*
+@@ -2449,6 +2509,7 @@
+ 
+ 	g_studio.numverts = g_studio.numelems = 0;
+     SGClipCacheBegin();
++    SGStudioClientScopeBegin();
+ 
+ 	m_skinnum = RI.currententity->curstate.skin;
+ 	ptexture = (mstudiotexture_t *)((byte *)m_pStudioHeader + m_pStudioHeader->textureindex);
+@@ -2631,6 +2692,7 @@
+ 		r_stats.c_studio_polys += pmesh->numtris;
+ 		tr.blend = oldblend;
+ 	}
++    SGStudioClientScopeEnd();
+     SGClipCacheEnd();
+ }
+ 
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -820,6 +820,7 @@
+ void SGStudioMeshArraysReport( void );
+ extern convar_t	r_studio_mesh_cull;
+ extern convar_t	r_studio_clip_cache;
++extern convar_t r_studio_client_states;
+ void SGStudioMeshCullReport( void );
+ extern convar_t	r_vbo;
+ extern convar_t	r_vbo_dlightmode;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -38,6 +38,7 @@
+ CVAR_DEFINE_AUTO( r_studio_mesh_compact, "0", FCVAR_GLCONFIG, "submit only current studio mesh arrays" );
+ CVAR_DEFINE_AUTO( r_studio_mesh_cull, "0", FCVAR_GLCONFIG, "cull off-screen classic static studio meshes (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_clip_cache, "0", FCVAR_GLCONFIG, "reuse exact clip masks within one submodel draw (experimental)" );
++CVAR_DEFINE_AUTO( r_studio_client_states, "0", FCVAR_GLCONFIG, "hold studio vertex/color client state per submodel (experimental)" );
+ CVAR_DEFINE( r_vbo, "gl_vbo", "0", FCVAR_GLCONFIG, "draw world using VBO (known to be glitchy)" );
+ CVAR_DEFINE( r_vbo_detail, "gl_vbo_detail", "0", FCVAR_GLCONFIG, "detail vbo mode (0: disable, 1: multipass, 2: singlepass, broken decal dlights)" );
+ CVAR_DEFINE( r_vbo_dlightmode, "gl_vbo_dlightmode", "1", FCVAR_GLCONFIG, "vbo dlight rendering mode (0-1)" );
+@@ -1161,6 +1162,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_compact );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_cull );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_clip_cache );
++	gEngfuncs.Cvar_RegisterVariable( &r_studio_client_states );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_dlightmode );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_overbrightmode );
+--- a/ref/gl/gl_rmain.c
++++ b/ref/gl/gl_rmain.c
+@@ -14,6 +14,8 @@
+ */
+ 
+ #include "gl_local.h"
++extern void SGStudioClientScopeReport( void );
++extern void SGStudioClientScopeReset( void );
+ extern void SGStudioEncodeReuseReport( void );
+ extern void SGClipCacheReport( void );
+ #include "xash3d_mathlib.h"
+@@ -1055,6 +1057,7 @@
+ */
+ void R_BeginFrame( qboolean clearScene )
+ {
++    SGStudioClientScopeReset();
+ 	glConfig.softwareGammaUpdate = false;	// in case of possible fails
+ 
+ 	if(( gl_clear->value || ENGINE_GET_PARM( PARM_DEV_OVERVIEW )) &&
+@@ -1155,6 +1158,7 @@
+ 	tr.realframecount++; // right called after viewmodel events
+ 	R_RenderScene();
+     SGStudioEncodeReuseReport();
++    SGStudioClientScopeReport();
+ 	SGStudioMeshCullReport();
+     SGClipCacheReport();
+ 	SGStudioMeshArraysReport();

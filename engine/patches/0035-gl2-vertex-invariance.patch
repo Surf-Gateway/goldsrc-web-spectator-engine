@@ -1,0 +1,10 @@
+--- a/ref/gl/gl2_shim/vertex.glsl.inc
++++ b/ref/gl/gl2_shim/vertex.glsl.inc
+@@ -34,6 +34,7 @@
+ "#endif\n"
+ "\n"
+ "uniform mat4 uMVP;\n"
++"invariant gl_Position;\n"
+ "\n"
+ "void main()\n"
+ "{\n"

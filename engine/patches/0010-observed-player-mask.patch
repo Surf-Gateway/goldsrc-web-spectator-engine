@@ -1,0 +1,88 @@
+--- a/engine/client/cl_frame.c
++++ b/engine/client/cl_frame.c
+@@ -49,6 +49,16 @@
+ 		!cl.players[slot - 1].name[0] || cl.players[slot - 1].userid <= 0 )
+ 		return -1.0;
+ 	return sgPlayerDisplay[slot - 1].time;
++}
++
++// Two 16-bit halves fit exactly in the client SDK's float cvars.
++unsigned int CL_GetPlayerDisplayMask( int first )
++{
++	unsigned int mask = 0;
++	int i;
++	for( i = 0; i < 16; i++ )
++		if( CL_GetPlayerDisplayTime( first + i ) >= 0.0 ) mask |= 1u << i;
++	return mask;
+ }
+ 
+ static void CL_StorePlayerDisplayTime( cl_entity_t *ent, double time )
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -986,6 +986,7 @@
+ qboolean V_PreRender( void );
+ void V_PostRender( void );
+ void V_RenderView( void );
++void V_ResetPlayerAvailability( void );
+ 
+ //
+ // cl_pmove.c
+@@ -1028,6 +1029,7 @@
+ void CL_ClearPlayerDisplayTimes( void );
+ void CL_ClearPlayerDisplayHistory( void );
+ double CL_GetPlayerDisplayTime( int slot );
++unsigned int CL_GetPlayerDisplayMask( int first );
+ void CL_ProcessPacket( frame_t *frame );
+ void CL_MoveThirdpersonCamera( void );
+ void CL_EmitEntities( void );
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -369,6 +369,29 @@
+ 
+ ==================
+ */
++static int sgPreviousPlayersLow = -1, sgPreviousPlayersHigh = -1;
++
++void V_ResetPlayerAvailability( void )
++{
++	sgPreviousPlayersLow = sgPreviousPlayersHigh = -1;
++}
++
++static void V_PublishPlayerAvailability( void )
++{
++	int low, high;
++	if( !cls.spectator ) return;
++	low = CL_GetPlayerDisplayMask( 1 );
++	high = CL_GetPlayerDisplayMask( 17 );
++	if( low == sgPreviousPlayersLow && high == sgPreviousPlayersHigh ) return;
++	sgPreviousPlayersLow = low;
++	sgPreviousPlayersHigh = high;
++	Cvar_SetValue( "_sg_web_players_low", low );
++	Cvar_SetValue( "_sg_web_players_high", high );
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ if(Module["onSGPlayerAvailability"]) Module["onSGPlayerAvailability"]($0, $1); }, low, high);
++#endif
++}
++
+ void V_RenderView( void )
+ {
+ 	// HACKHACK: make ref params static
+@@ -380,6 +403,8 @@
+ 	if( !cl.video_prepped || ( !ui_renderworld.value && UI_IsVisible() && !cl.background ))
+ 		return; // still loading
+ 
++	// Publish current linked poses before the client chooses its camera.
++	V_PublishPlayerAvailability();
+ 	V_CalcViewRect ();	// compute viewport rectangle
+ 	V_SetRefParams( &rp );
+ 	V_SetupViewModel ();
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -1494,6 +1494,7 @@
+ 	EM_ASM({ if(Module["onSGReset"]) Module["onSGReset"](); });
+ #endif
+ 	CL_ClearPlayerDisplayHistory();
++	V_ResetPlayerAvailability();
+ 
+ 	CL_ClearResourceLists();
+ 

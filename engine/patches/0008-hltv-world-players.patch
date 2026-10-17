@@ -1,0 +1,39 @@
+--- a/engine/client/cl_frame.c
++++ b/engine/client/cl_frame.c
+@@ -626,7 +626,8 @@ void CL_ProcessPacket( frame_t *frame )
+ 		ent = &clgame.entities[state->number];
+ 		ent->player = CL_IsPlayerIndex( state->number );
+ 
+-		if( state->number == ( cl.playernum + 1 ))
++		// HLTV has no predicted local player; preserve every observed origin.
++		if( !cls.spectator && state->number == ( cl.playernum + 1 ))
+ 			clgame.dllFuncs.pfnTxferLocalOverrides( state, &frame->clientdata );
+ 
+ 		// shuffle states
+@@ -639,7 +640,7 @@ void CL_ProcessPacket( frame_t *frame )
+ 
+ 		CL_ProcessPlayerState(( state->number - 1 ), state );
+ 
+-		if( state->number == ( cl.playernum + 1 ))
++		if( !cls.spectator && state->number == ( cl.playernum + 1 ))
+ 			CL_CheckPredictionError();
+ 	}
+ }
+@@ -1065,7 +1066,7 @@ static void CL_LinkPlayers( frame_t *frame )
+ 		// fixup the player indexes...
+ 		if( ent->index != ( i + 1 )) ent->index = (i + 1);
+ 
+-		if( i == cl.playernum )
++		if( !cls.spectator && i == cl.playernum )
+ 		{
+ 			if( cls.demoplayback != DEMO_QUAKE1 )
+ 			{
+@@ -1086,7 +1087,7 @@ static void CL_LinkPlayers( frame_t *frame )
+ 			CL_ResetPositions( ent );
+ 		}
+ 
+-		if ( i == cl.playernum )
++		if ( !cls.spectator && i == cl.playernum )
+ 		{
+ 			// using interpolation only for local player angles
+ 			CL_ComputePlayerOrigin( ent );

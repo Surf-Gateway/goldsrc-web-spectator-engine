@@ -1,0 +1,68 @@
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -826,6 +826,7 @@
+ extern convar_t r_studio_client_states;
+ extern convar_t r_studio_constant_light;
+ extern convar_t r_studio_zero_local_light;
++extern convar_t r_studio_bounds_bits;
+ #ifdef __EMSCRIPTEN__
+ extern convar_t r_mip_rgba_pairs;
+ #endif
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -43,6 +43,7 @@
+ CVAR_DEFINE_AUTO( r_studio_clip_cache, "0", FCVAR_GLCONFIG, "reuse exact clip masks within one submodel draw (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_client_states, "0", FCVAR_GLCONFIG, "hold studio vertex/color client state per submodel (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_constant_light, "0", FCVAR_GLCONFIG, "reuse original constant studio lighting per mesh" );
++CVAR_DEFINE_AUTO( r_studio_bounds_bits, "0", FCVAR_GLCONFIG, "exact binary32 studio coordinate validation (candidate)" );
+ CVAR_DEFINE_AUTO( r_studio_zero_local_light, "0", FCVAR_GLCONFIG, "exact zero-local-light studio vertex setup" );
+ #ifdef __EMSCRIPTEN__
+ CVAR_DEFINE_AUTO( r_mip_rgba_pairs, "0", FCVAR_GLCONFIG, "exact packed RGBA mip reduction (candidate)" );
+@@ -1184,6 +1185,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_client_states );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_constant_light );
+     gEngfuncs.Cvar_RegisterVariable( &r_studio_zero_local_light );
++    gEngfuncs.Cvar_RegisterVariable( &r_studio_bounds_bits );
+ #ifdef __EMSCRIPTEN__
+     gEngfuncs.Cvar_RegisterVariable( &r_mip_rgba_pairs );
+ #endif
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -2503,6 +2503,7 @@
+     vec3_t mins, maxs;
+     int count, i, axis;
+     qboolean haveVertex = false;
++    qboolean sgUseBoundsBits = false;
+     if( !r_studio_mesh_cull.value ) return false;
+     sg_mesh_cull.checked++;
+     if( r_nocull.value || !RP_NORMALPASS() || !RI.drawWorld || RI.currententity == tr.viewent ||
+@@ -2517,6 +2518,9 @@
+         mesh->triindex < (int)sizeof(*hdr) || (mesh->triindex & 1) || mesh->triindex >= hdr->length ) goto unsupported;
+     seq = (const mstudioseqdesc_t *)(base + hdr->seqindex);
+     if( seq->numframes != 1 || seq->numblends != 1 ) goto unsupported;
++#ifdef __EMSCRIPTEN__
++    sgUseBoundsBits = r_studio_bounds_bits.value==1;
++#endif
+     offset = mesh->triindex;
+     ClearBounds( mins, maxs );
+     for( ;; )
+@@ -2535,8 +2539,19 @@
+             const float *v;
+             if( index < 0 || index >= m_pSubModel->numverts ) goto unsupported;
+             v = g_studio.verts[index];
++            if( sgUseBoundsBits )
++            {
++                uint32_t bits[3];
++                memcpy( bits, v, sizeof(bits) );
++                if( (bits[0]&UINT32_C(0x7fffffff))>UINT32_C(0x49800000) ||
++                    (bits[1]&UINT32_C(0x7fffffff))>UINT32_C(0x49800000) ||
++                    (bits[2]&UINT32_C(0x7fffffff))>UINT32_C(0x49800000) ) goto unsupported;
++            }
++            else
++            {
+             for( axis = 0; axis < 3; axis++ )
+                 if( !isfinite(v[axis]) || fabs(v[axis]) > 1048576.0f ) goto unsupported;
++            }
+             AddPointToBounds( v, mins, maxs );
+         }
+         haveVertex = true; refs += count; offset += count * 4 * sizeof(short);

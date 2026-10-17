@@ -1,0 +1,114 @@
+diff --git a/engine/common/imagelib/img_utils.c b/engine/common/imagelib/img_utils.c
+--- a/engine/common/imagelib/img_utils.c
++++ b/engine/common/imagelib/img_utils.c
+@@ -601,14 +601,14 @@
+ NOTE: must call Image_GetPaletteXXX before used
+ ============
+ */
+-qboolean Image_Copy8bitRGBA( const byte *in, byte *out, int pixels )
++static qboolean Image_Copy8bitRGBAWithPalette( const byte *in, byte *out, int pixels, const uint *palette )
+ {
+ 	int	*iout = (int *)out;
+ 	byte	*fin = (byte *)in;
+ 	byte	*col;
+ 	int	i;
+ 
+-	if( !in || !image.d_currentpal )
++	if( !in || !palette )
+ 		return false;
+ 
+ 	// this is a base image with luma - clear luma pixels
+@@ -621,7 +621,7 @@
+ 	// check for color
+ 	for( i = 0; i < 256; i++ )
+ 	{
+-		col = (byte *)&image.d_currentpal[i];
++		col = (byte *)&palette[i];
+ 		if( col[0] != col[1] || col[1] != col[2] )
+ 		{
+ 			image.flags |= IMAGE_HAS_COLOR;
+@@ -631,14 +631,14 @@
+ 
+ 	while( pixels >= 8 )
+ 	{
+-		iout[0] = image.d_currentpal[in[0]];
+-		iout[1] = image.d_currentpal[in[1]];
+-		iout[2] = image.d_currentpal[in[2]];
+-		iout[3] = image.d_currentpal[in[3]];
+-		iout[4] = image.d_currentpal[in[4]];
+-		iout[5] = image.d_currentpal[in[5]];
+-		iout[6] = image.d_currentpal[in[6]];
+-		iout[7] = image.d_currentpal[in[7]];
++		iout[0] = palette[in[0]];
++		iout[1] = palette[in[1]];
++		iout[2] = palette[in[2]];
++		iout[3] = palette[in[3]];
++		iout[4] = palette[in[4]];
++		iout[5] = palette[in[5]];
++		iout[6] = palette[in[6]];
++		iout[7] = palette[in[7]];
+ 
+ 		in += 8;
+ 		iout += 8;
+@@ -647,27 +647,32 @@
+ 
+ 	if( pixels & 4 )
+ 	{
+-		iout[0] = image.d_currentpal[in[0]];
+-		iout[1] = image.d_currentpal[in[1]];
+-		iout[2] = image.d_currentpal[in[2]];
+-		iout[3] = image.d_currentpal[in[3]];
++		iout[0] = palette[in[0]];
++		iout[1] = palette[in[1]];
++		iout[2] = palette[in[2]];
++		iout[3] = palette[in[3]];
+ 		in += 4;
+ 		iout += 4;
+ 	}
+ 
+ 	if( pixels & 2 )
+ 	{
+-		iout[0] = image.d_currentpal[in[0]];
+-		iout[1] = image.d_currentpal[in[1]];
++		iout[0] = palette[in[0]];
++		iout[1] = palette[in[1]];
+ 		in += 2;
+ 		iout += 2;
+ 	}
+ 
+ 	if( pixels & 1 ) // last byte
+-		iout[0] = image.d_currentpal[in[0]];
++		iout[0] = palette[in[0]];
+ 	image.type = PF_RGBA_32;	// update image type;
+ 
+ 	return true;
++}
++
++qboolean Image_Copy8bitRGBA( const byte *in, byte *out, int pixels )
++{
++	return Image_Copy8bitRGBAWithPalette( in, out, pixels, image.d_currentpal );
+ }
+ 
+ static void Image_Resample32LerpLine( const byte *in, byte *out, int inwidth, int outwidth )
+@@ -1269,9 +1274,18 @@
+ 		else Image_GetPaletteLMP( image.palette, LUMP_NORMAL );
+ 		// intentionally fallthrough
+ 	case PF_INDEXED_32:
+-		if( !image.d_currentpal ) image.d_currentpal = (uint *)image.palette;
+-		if( !Image_Copy8bitRGBA( fin, fout, image.width * image.height ))
+-			return false;
++		// Owned 32-bit palettes remain local, including allocation/error exits.
++		if( image.type == PF_INDEXED_32 && image.palette )
++		{
++			if( !Image_Copy8bitRGBAWithPalette( fin, fout, image.width * image.height, (const uint *)image.palette ))
++				return false;
++		}
++		else
++		{
++			if( !image.d_currentpal ) image.d_currentpal = (uint *)image.palette;
++			if( !Image_Copy8bitRGBA( fin, fout, image.width * image.height ))
++				return false;
++		}
+ 		break;
+ 	case PF_BGR_24:
+ 		for (i = 0; i < image.width * image.height; i++ )

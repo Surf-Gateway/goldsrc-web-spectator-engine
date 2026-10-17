@@ -1,0 +1,236 @@
+--- a/engine/client/cl_frame.c
++++ b/engine/client/cl_frame.c
+@@ -26,6 +26,106 @@
+ 
+ // #define STUDIO_INTERPOLATION_FIX
+ 
++// Effective source time of the pose actually supplied to the HLTV camera.
++// Keep this outside SDK structs: no engine/client DLL ABI change.
++static struct
++{
++	qboolean valid;
++	int userid;
++	double time;
++} sgPlayerDisplay[MAX_CLIENTS];
++
++void CL_ClearPlayerDisplayTimes( void )
++{
++	memset( sgPlayerDisplay, 0, sizeof( sgPlayerDisplay ));
++}
++
++double CL_GetPlayerDisplayTime( int slot )
++{
++	if( !cls.spectator || slot < 1 || slot > cl.maxclients || slot > MAX_CLIENTS )
++		return -1.0;
++	if( !sgPlayerDisplay[slot - 1].valid ||
++		sgPlayerDisplay[slot - 1].userid != cl.players[slot - 1].userid ||
++		!cl.players[slot - 1].name[0] || cl.players[slot - 1].userid <= 0 )
++		return -1.0;
++	return sgPlayerDisplay[slot - 1].time;
++}
++
++static void CL_StorePlayerDisplayTime( cl_entity_t *ent, double time )
++{
++	int slot = ent->index;
++	if( !cls.spectator || slot < 1 || slot > cl.maxclients || slot > MAX_CLIENTS )
++		return;
++	sgPlayerDisplay[slot - 1].time = time;
++	sgPlayerDisplay[slot - 1].userid = cl.players[slot - 1].userid;
++	sgPlayerDisplay[slot - 1].valid = isfinite( time ) && time >= 0.0;
++}
++
++// Each SDK history entry's origin came from a world frame. Animation time
++// chooses the blend, but does not establish that frame's telemetry clock.
++typedef struct
++{
++	int userid;
++	double worldTime[HISTORY_MAX];
++	qboolean valid[HISTORY_MAX];
++} sg_player_history_t;
++static sg_player_history_t sgPlayerHistory[MAX_CLIENTS];
++
++void CL_ClearPlayerDisplayHistory( void )
++{
++	CL_ClearPlayerDisplayTimes();
++	memset( sgPlayerHistory, 0, sizeof( sgPlayerHistory ));
++}
++
++static sg_player_history_t *CL_PlayerSourceHistory( cl_entity_t *ent )
++{
++	int slot = ent->index;
++	sg_player_history_t *history;
++	if( !cls.spectator || !ent->player || slot < 1 || slot > cl.maxclients || slot > MAX_CLIENTS )
++		return NULL;
++	history = &sgPlayerHistory[slot - 1];
++	if( history->userid != cl.players[slot - 1].userid )
++	{
++		memset( history, 0, sizeof( *history ));
++		history->userid = cl.players[slot - 1].userid;
++	}
++	return history->userid > 0 ? history : NULL;
++}
++
++static void CL_StorePlayerHistoryTime( cl_entity_t *ent )
++{
++	sg_player_history_t *history = CL_PlayerSourceHistory( ent );
++	if( !history ) return;
++	history->worldTime[ent->current_position] = ent->curstate.msg_time;
++	history->valid[ent->current_position] = isfinite( ent->curstate.msg_time ) && ent->curstate.msg_time >= 0.0;
++}
++
++static void CL_ResetPlayerSourceHistory( cl_entity_t *ent )
++{
++	sg_player_history_t *history = CL_PlayerSourceHistory( ent );
++	double time;
++	qboolean valid;
++	if( !history ) return;
++	time = history->worldTime[ent->current_position];
++	valid = history->valid[ent->current_position];
++	memset( history->worldTime, 0, sizeof( history->worldTime ));
++	memset( history->valid, 0, sizeof( history->valid ));
++	history->worldTime[0] = history->worldTime[1] = time;
++	history->valid[0] = history->valid[1] = valid;
++}
++
++static double CL_PlayerHistoryTime( cl_entity_t *ent, position_history_t *ph0, position_history_t *ph1, double frac )
++{
++	sg_player_history_t *history = CL_PlayerSourceHistory( ent );
++	int i0 = ph0 - ent->ph;
++	int i1 = ph1 - ent->ph;
++	if( !history ) return -1.0;
++	if( frac == 0.0 ) return history->valid[i1] ? history->worldTime[i1] : -1.0;
++	if( frac == 1.0 ) return history->valid[i0] ? history->worldTime[i0] : -1.0;
++	if( !history->valid[i0] || !history->valid[i1] ) return -1.0;
++	return history->worldTime[i1] + frac * ( history->worldTime[i0] - history->worldTime[i1] );
++}
++
+ /*
+ =========================================================================
+ 
+@@ -52,6 +152,7 @@
+ 	VectorCopy( ent->curstate.angles, ph->angles );
+ 
+ 	ph->animtime = ent->curstate.animtime;
++	CL_StorePlayerHistoryTime( ent );
+ 
+ 	// a1ba: for some reason, this sometimes still may happen
+ 	// at this time, I'm not sure whether this bug happens in delta readwrite code
+@@ -80,6 +181,7 @@
+ 	if( !ent ) return;
+ 
+ 	store = ent->ph[ent->current_position];
++	CL_ResetPlayerSourceHistory( ent );
+ 	ent->current_position = 1;
+ 
+ 	memset( ent->ph, 0, sizeof( position_history_t ) * HISTORY_MAX );
+@@ -393,7 +495,7 @@
+ non-local players interpolation
+ ==================
+ */
+-static void CL_PureOrigin( cl_entity_t *ent, double t, vec3_t outorigin, vec3_t outangles )
++static double CL_PureOrigin( cl_entity_t *ent, double t, vec3_t outorigin, vec3_t outangles )
+ {
+ 	double		t1, t0, frac;
+ 	position_history_t	*ph0, *ph1;
+@@ -423,12 +525,15 @@
+ 		AngleQuaternion( ph1->angles, q2, false );
+ 		QuaternionSlerp( q2, q1, frac, q );
+ 		QuaternionAngle( q, outangles );
++		// Use the same bounded fraction as both position and angle interpolation.
++		return CL_PlayerHistoryTime( ent, ph0, ph1, frac );
+ 	}
+ 	else
+ 	{
+ 		// no backup found
+ 		VectorCopy( ph1->origin, outorigin );
+ 		VectorCopy( ph1->angles, outangles );
++		return CL_PlayerHistoryTime( ent, ph0, ph1, 0.0 );
+ 	}
+ }
+ 
+@@ -531,6 +636,7 @@
+ 	vec3_t	origin;
+ 	vec3_t	angles;
+ 
++	CL_StorePlayerDisplayTime( ent, -1.0 );
+ 	if( !ent->player )
+ 		return;
+ 
+@@ -538,6 +644,7 @@
+ 	{
+ 		VectorCopy( ent->curstate.angles, ent->angles );
+ 		VectorCopy( ent->curstate.origin, ent->origin );
++		CL_StorePlayerDisplayTime( ent, ent->curstate.msg_time );
+ 		return;
+ 	}
+ 
+@@ -553,7 +660,7 @@
+ 	}
+ 
+ 	targettime = cl.time - cl_interp.value;
+-	CL_PureOrigin( ent, targettime, origin, angles );
++	CL_StorePlayerDisplayTime( ent, CL_PureOrigin( ent, targettime, origin, angles ) );
+ 
+ 	VectorCopy( angles, ent->angles );
+ 	VectorCopy( origin, ent->origin );
+@@ -1051,6 +1158,9 @@
+ 	// apply muzzleflash to weaponmodel
+ 	if( ent && FBitSet( ent->curstate.effects, EF_MUZZLEFLASH ))
+ 		SetBits( clgame.viewent.curstate.effects, EF_MUZZLEFLASH );
++
++	// Missing entities cannot retain another frame's HUD pose timestamp.
++	CL_ClearPlayerDisplayTimes();
+ 
+ 	// check all the clients but add only visible
+ 	for( i = 0, state = frame->playerstate; i < MAX_CLIENTS; i++, state++ )
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -1493,6 +1493,7 @@
+ #ifdef __EMSCRIPTEN__
+ 	EM_ASM({ if(Module["onSGReset"]) Module["onSGReset"](); });
+ #endif
++	CL_ClearPlayerDisplayHistory();
+ 
+ 	CL_ClearResourceLists();
+ 
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -1025,6 +1025,9 @@
+ qboolean CL_GetEntitySpatialization( struct channel_s *ch );
+ qboolean CL_GetMovieSpatialization( struct rawchan_s *ch );
+ void CL_ComputePlayerOrigin( cl_entity_t *clent );
++void CL_ClearPlayerDisplayTimes( void );
++void CL_ClearPlayerDisplayHistory( void );
++double CL_GetPlayerDisplayTime( int slot );
+ void CL_ProcessPacket( frame_t *frame );
+ void CL_MoveThirdpersonCamera( void );
+ void CL_EmitEntities( void );
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -409,14 +409,24 @@
+ 	ref.dllFuncs.GL_BackendEndFrame ();
+ #ifdef __EMSCRIPTEN__
+ 	// The client DLL publishes its actual first-person target after CalcRefdef.
+-	// cl.time is also rp.time: never substitute packet arrival or wall time.
++	// Render time differs from the effective interpolated target pose time.
+ 	{
+ 		int slot = (int)Cvar_VariableValue( "_sg_web_target" );
+ 		int userid = 0;
++		cl_entity_t *ent;
++		double playerTime;
+ 		if( slot >= 1 && slot <= cl.maxclients && slot <= MAX_CLIENTS && cl.players[slot - 1].name[0] )
+ 			userid = cl.players[slot - 1].userid;
+ 		else slot = 0;
+-		EM_ASM({ if(Module["onSGFrame"]) Module["onSGFrame"]($0, $1, $2); }, rp.time, slot, userid);
++		ent = slot ? &clgame.entities[slot] : NULL;
++		playerTime = CL_GetPlayerDisplayTime( slot );
++		EM_ASM({
++			if(Module["onSGFrame"]) Module["onSGFrame"]($0, $1, $2, $3);
++			// Optional bounded test capture. Copy synchronously; retain no WASM views.
++			if(Module["onSGCamera"] && $4) Module["onSGCamera"]($0, $1, $2, $3,
++				[HEAPF32[$4>>2], HEAPF32[($4>>2)+1], HEAPF32[($4>>2)+2]],
++				[HEAPF32[$5>>2], HEAPF32[($5>>2)+1], HEAPF32[($5>>2)+2]]);
++		}, rp.time, slot, userid, playerTime, ent ? ent->origin : NULL, rp.vieworg);
+ 	}
+ #endif
+ }

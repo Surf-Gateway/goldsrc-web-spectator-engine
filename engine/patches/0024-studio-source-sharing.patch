@@ -1,0 +1,207 @@
+--- a/ref/gl/gl_image.c
++++ b/ref/gl/gl_image.c
+@@ -75,6 +75,112 @@
+         sg_studio_codec.encodeMs,sg_studio_codec.decodeMs,sg_studio_codec.maxEncodeMs,sg_studio_codec.maxDecodeMs);
+ #endif
+ }
++/* Prototype: share only owned packed CPU bytes. Palettes/handles stay private. */
++#define SG_STUDIO_BLOB_RECORDS MAX_TEXTURES
++#define SG_STUDIO_BLOB_CANDIDATES 16u
++static struct sg_studio_blob_s
++{
++    byte *buffer;
++    size_t bytes, rawBytes;
++    unsigned int key, refs, next;
++} sg_studio_blobs[SG_STUDIO_BLOB_RECORDS];
++static unsigned int sg_studio_blob_buckets[SG_STUDIO_BLOB_RECORDS];
++static unsigned int sg_studio_blob_free, sg_studio_blob_ready;
++static struct
++{
++    unsigned int blobs, owners, sharedTotal, refusals;
++    size_t uniqueBytes, peakUniqueBytes, savedBytes, peakSavedBytes, comparedBytes;
++} sg_studio_share;
++
++static void SGStudioShareReport( void )
++{
++#ifdef __EMSCRIPTEN__
++    const unsigned int enabled=r_studio_source_share.value!=0;
++    EM_ASM({
++        const s=Module["sgStudioSourceSharing"]??={};
++        s.enabled=Boolean($0);s.blobs=$1;s.owners=$2;s.sharedTotal=$3;s.refusals=$4;
++        s.uniqueBytes=$5;s.peakUniqueBytes=$6;s.savedBytes=$7;s.peakSavedBytes=$8;s.comparedBytes=$9;
++        s.maxBlobs=$10;s.maxCandidates=$11;
++    },enabled,sg_studio_share.blobs,sg_studio_share.owners,sg_studio_share.sharedTotal,sg_studio_share.refusals,
++      (double)sg_studio_share.uniqueBytes,(double)sg_studio_share.peakUniqueBytes,(double)sg_studio_share.savedBytes,
++      (double)sg_studio_share.peakSavedBytes,(double)sg_studio_share.comparedBytes,SG_STUDIO_BLOB_RECORDS,SG_STUDIO_BLOB_CANDIDATES);
++#endif
++}
++static unsigned int SGStudioBlobKey( const byte *buffer, size_t bytes, size_t raw )
++{
++    /* Only narrow candidates. Equality always requires full byte comparison. */
++    unsigned int key=(unsigned int)bytes^(unsigned int)raw;
++    unsigned int i;
++    for(i=0;i<8;i++)key=(key*16777619u)^buffer[i];
++    for(i=0;i<8;i++)key=(key*16777619u)^buffer[bytes-1-i];
++    return key;
++}
++static void SGStudioSharePackedSource( gl_texture_t *tex )
++{
++    unsigned int key,bucket,entry,visited=0,i;
++    size_t span=0,bytes=tex->studio_codec_bytes;
++    rgbdata_t *pic=tex->studio_pending;
++    struct sg_studio_blob_s *record;
++    if( !r_studio_source_share.value ) return;
++    if( !pic || !pic->buffer || tex->studio_shared_blob || bytes<16 || bytes>=pic->size ||
++        pic->size>4u*1024u*1024u ) { sg_studio_share.refusals++;return; }
++    if( !sg_studio_blob_ready )
++    {
++        for(i=0;i<SG_STUDIO_BLOB_RECORDS;i++)sg_studio_blobs[i].next=i+2;
++        sg_studio_blobs[SG_STUDIO_BLOB_RECORDS-1].next=0;
++        sg_studio_blob_free=1;sg_studio_blob_ready=1;
++    }
++    key=SGStudioBlobKey(pic->buffer,bytes,pic->size);bucket=key%SG_STUDIO_BLOB_RECORDS;
++    for(entry=sg_studio_blob_buckets[bucket];entry;entry=record->next)
++    {
++        if(++visited>SG_STUDIO_BLOB_CANDIDATES){sg_studio_share.refusals++;return;}
++        record=&sg_studio_blobs[entry-1];
++        if(record->key!=key||record->bytes!=bytes||record->rawBytes!=pic->size)continue;
++        /* At most two full-sized candidate spans per admission. */
++        if(span>=bytes*2u){sg_studio_share.refusals++;return;}
++        span+=bytes;sg_studio_share.comparedBytes+=bytes;
++        if(memcmp(record->buffer,pic->buffer,bytes))continue;
++        if(record->refs>=SG_STUDIO_BLOB_RECORDS){sg_studio_share.refusals++;return;}
++        gEngfuncs._Mem_Free(pic->buffer,__FILE__,__LINE__);pic->buffer=record->buffer;
++        record->refs++;tex->studio_shared_blob=entry;sg_studio_share.owners++;sg_studio_share.sharedTotal++;
++        sg_studio_share.savedBytes+=bytes;
++        sg_studio_share.peakSavedBytes=Q_max(sg_studio_share.peakSavedBytes,sg_studio_share.savedBytes);
++        sg_studio_residency.pendingBytes-=bytes;return;
++    }
++    if(!sg_studio_blob_free||bytes>SG_STUDIO_PENDING_BUDGET-sg_studio_share.uniqueBytes){sg_studio_share.refusals++;return;}
++    entry=sg_studio_blob_free;record=&sg_studio_blobs[entry-1];sg_studio_blob_free=record->next;
++    record->buffer=pic->buffer;record->bytes=bytes;record->rawBytes=pic->size;record->key=key;record->refs=1;
++    record->next=sg_studio_blob_buckets[bucket];sg_studio_blob_buckets[bucket]=entry;
++    tex->studio_shared_blob=entry;sg_studio_share.blobs++;sg_studio_share.owners++;sg_studio_share.uniqueBytes+=bytes;
++    sg_studio_share.peakUniqueBytes=Q_max(sg_studio_share.peakUniqueBytes,sg_studio_share.uniqueBytes);
++}
++static size_t SGStudioReleasePackedSource( gl_texture_t *tex, size_t *virtualBytes )
++{
++    unsigned int entry=tex->studio_shared_blob,*link;
++    struct sg_studio_blob_s *record;
++    size_t freed=0;
++    if(!entry){*virtualBytes=tex->studio_codec_bytes;return 0;}
++    if(entry>SG_STUDIO_BLOB_RECORDS){gEngfuncs.Host_Error("Invalid packed-source reference\n");return 0;}
++    record=&sg_studio_blobs[entry-1];
++    if(!record->refs||!tex->studio_pending||record->buffer!=tex->studio_pending->buffer)
++    {gEngfuncs.Host_Error("Packed-source ownership mismatch\n");return 0;}
++    link=&sg_studio_blob_buckets[record->key%SG_STUDIO_BLOB_RECORDS];
++    if(record->refs==1)
++    {
++        unsigned int visited=0;
++        while(*link&&*link!=entry&&visited++<SG_STUDIO_BLOB_RECORDS)link=&sg_studio_blobs[*link-1].next;
++        if(*link!=entry){gEngfuncs.Host_Error("Packed-source registry mismatch\n");return 0;}
++    }
++    *virtualBytes=record->bytes;
++    tex->studio_pending->buffer=NULL;tex->studio_shared_blob=0;sg_studio_share.owners--;
++    if(record->refs>1){record->refs--;sg_studio_share.savedBytes-=record->bytes;return 0;}
++    *link=record->next;
++    freed=record->bytes;sg_studio_share.uniqueBytes-=freed;sg_studio_share.blobs--;
++    gEngfuncs._Mem_Free(record->buffer,__FILE__,__LINE__);
++    memset(record,0,sizeof(*record));record->next=sg_studio_blob_free;sg_studio_blob_free=entry;
++    return freed;
++}
++
+ static void SGStudioCodecScratchFree( gl_texture_t *tex )
+ {
+     if( tex->studio_codec_scratch ) gEngfuncs._Mem_Free(tex->studio_codec_scratch,__FILE__,__LINE__);
+@@ -104,6 +210,7 @@
+     tex->studio_codec_bytes=packed;
+     tex->studio_pending_bytes-=raw-packed;sg_studio_residency.pendingBytes-=raw-packed;
+     sg_studio_codec.savedTotalBytes+=raw-packed;sg_studio_codec.compressed++;
++    SGStudioSharePackedSource(tex);SGStudioShareReport();
+     SGStudioCodecScratchFree(tex);SGStudioCodecReport();return;
+ fallback:
+     sg_studio_codec.fallback++;SGStudioCodecScratchFree(tex);SGStudioCodecReport();
+@@ -112,6 +219,7 @@
+ {
+     rgbdata_t *pic=tex->studio_pending;
+     mz_ulong restored;
++    size_t virtualBytes,freedBytes;
+     double started,elapsed;
+     int result;
+     if( !tex->studio_codec_bytes ) return true;
+@@ -123,25 +231,34 @@
+     sg_studio_codec.decodeMs+=elapsed;sg_studio_codec.maxDecodeMs=Q_max(sg_studio_codec.maxDecodeMs,elapsed);
+     if( result!=MZ_OK || restored!=pic->size )
+     { sg_studio_codec.decodeFailures++;SGStudioCodecReport();return false; }
+-    gEngfuncs._Mem_Free(pic->buffer,__FILE__,__LINE__);pic->buffer=tex->studio_codec_scratch;
++    virtualBytes=tex->studio_codec_bytes;freedBytes=virtualBytes;
++    if(tex->studio_shared_blob)freedBytes=SGStudioReleasePackedSource(tex,&virtualBytes);
++    else gEngfuncs._Mem_Free(pic->buffer,__FILE__,__LINE__);
++    pic->buffer=tex->studio_codec_scratch;
+     tex->studio_codec_scratch=NULL;
+-    tex->studio_pending_bytes+=restored-tex->studio_codec_bytes;
+-    sg_studio_residency.pendingBytes+=restored-tex->studio_codec_bytes;
++    tex->studio_pending_bytes+=restored-virtualBytes;
++    sg_studio_residency.pendingBytes+=restored-freedBytes;
+     sg_studio_residency.peakPendingBytes=Q_max(sg_studio_residency.peakPendingBytes,sg_studio_residency.pendingBytes);
+-    tex->studio_codec_bytes=0;sg_studio_codec.decoded++;SGStudioCodecReport();return true;
++    tex->studio_codec_bytes=0;sg_studio_codec.decoded++;SGStudioShareReport();SGStudioCodecReport();return true;
+ }
+ 
+ static void GL_ReleaseStudioSource( gl_texture_t *tex )
+ {
+     SGStudioCodecScratchFree(tex);
+     if( !tex->studio_pending ) return;
++    if(tex->studio_shared_blob)
++    {
++        size_t virtualBytes,freedBytes=SGStudioReleasePackedSource(tex,&virtualBytes);
++        sg_studio_residency.pendingBytes-=tex->studio_pending_bytes-virtualBytes+freedBytes;
++    }
++    else sg_studio_residency.pendingBytes-=tex->studio_pending_bytes;
+     sg_studio_residency.logicalPendingBytes-=tex->studio_pending_logical_bytes;
+     tex->studio_pending_logical_bytes=tex->studio_codec_bytes=0;
+-    sg_studio_residency.pendingBytes -= tex->studio_pending_bytes;
+     sg_studio_residency.pendingCount--;
+     gEngfuncs.FS_FreeImage( tex->studio_pending );
+     tex->studio_pending = NULL;
+     tex->studio_pending_bytes = 0;
++    SGStudioShareReport();
+ }
+ 
+ 
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -128,6 +128,7 @@
+ 	size_t		studio_pending_bytes;
+ 	size_t studio_pending_logical_bytes, studio_codec_bytes;
+ 	byte *studio_codec_scratch;
++	unsigned int studio_shared_blob;
+ 	int		studio_state;
+ 
+ 	// debug info
+@@ -813,6 +814,7 @@
+ extern convar_t	r_static_lightmap_batch;
+ extern convar_t	r_studio_texture_defer;
+ extern convar_t r_studio_source_compress;
++extern convar_t r_studio_source_share;
+ extern convar_t	r_studio_mesh_compact;
+ void SGStudioMeshArraysReport( void );
+ extern convar_t	r_studio_mesh_cull;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -32,6 +32,7 @@
+ CVAR_DEFINE_AUTO( gl_round_down, "2", FCVAR_GLCONFIG|FCVAR_READ_ONLY, "round texture sizes to nearest POT value" );
+ CVAR_DEFINE_AUTO( r_static_lightmap_batch, "0", FCVAR_GLCONFIG, "batch static lightmap triangles (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_texture_defer, "0", FCVAR_GLCONFIG, "defer eligible MDL texture uploads until first use (experimental)" );
++CVAR_DEFINE_AUTO( r_studio_source_share, "0", FCVAR_GLCONFIG, "share exact owned packed studio sources (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_source_compress, "0", FCVAR_GLCONFIG, "losslessly compress owned pending studio sources (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_mesh_compact, "0", FCVAR_GLCONFIG, "submit only current studio mesh arrays" );
+ CVAR_DEFINE_AUTO( r_studio_mesh_cull, "0", FCVAR_GLCONFIG, "cull off-screen classic static studio meshes (experimental)" );
+@@ -1153,6 +1154,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_static_lightmap_batch );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_texture_defer );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_compress );
++	gEngfuncs.Cvar_RegisterVariable( &r_studio_source_share );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_compact );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_mesh_cull );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo );

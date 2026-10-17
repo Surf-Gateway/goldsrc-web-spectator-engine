@@ -1,0 +1,93 @@
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -30,6 +30,7 @@
+ CVAR_DEFINE_AUTO( r_lockfrustum, "0", FCVAR_CHEAT, "lock frustrum area at current point (cull test)" );
+ CVAR_DEFINE_AUTO( r_traceglow, "0", FCVAR_GLCONFIG, "cull flares behind models" );
+ CVAR_DEFINE_AUTO( gl_round_down, "2", FCVAR_GLCONFIG|FCVAR_READ_ONLY, "round texture sizes to nearest POT value" );
++CVAR_DEFINE_AUTO( r_static_lightmap_batch, "0", FCVAR_GLCONFIG, "batch static lightmap triangles (experimental)" );
+ CVAR_DEFINE( r_vbo, "gl_vbo", "0", FCVAR_GLCONFIG, "draw world using VBO (known to be glitchy)" );
+ CVAR_DEFINE( r_vbo_detail, "gl_vbo_detail", "0", FCVAR_GLCONFIG, "detail vbo mode (0: disable, 1: multipass, 2: singlepass, broken decal dlights)" );
+ CVAR_DEFINE( r_vbo_dlightmode, "gl_vbo_dlightmode", "1", FCVAR_GLCONFIG, "vbo dlight rendering mode (0-1)" );
+@@ -1145,6 +1146,7 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_ripple_updatetime );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_ripple_spawntime );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_shadows );
++	gEngfuncs.Cvar_RegisterVariable( &r_static_lightmap_batch );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_dlightmode );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo_overbrightmode );
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -801,6 +801,7 @@
+ extern convar_t	r_lockpvs;
+ extern convar_t	r_lockfrustum;
+ extern convar_t	r_traceglow;
++extern convar_t	r_static_lightmap_batch;
+ extern convar_t	r_vbo;
+ extern convar_t	r_vbo_dlightmode;
+ extern convar_t	r_vbo_detail;
+--- a/ref/gl/gl_rsurf.c
++++ b/ref/gl/gl_rsurf.c
+@@ -915,6 +915,45 @@
+ 	}
+ }
+ 
++// The GL2 shim maps GL_POLYGON to a triangle fan. Emit the identical triangles
++// across static surfaces sharing one lightmap atlas and unchanged pass state.
++// Keep every Begin/End below the shim's 8192-vertex limit, even within a polygon.
++#define STATIC_LIGHTMAP_BATCH_VERTS 3072
++static void R_DrawStaticLightmapBatch( msurface_t *surf )
++{
++	int vertices = 0;
++
++	for( ; surf != NULL; surf = surf->info->lightmapchain )
++	{
++		glpoly2_t *p;
++
++		for( p = surf->polys; p != NULL; p = p->chain )
++		{
++			int i;
++
++			for( i = 1; i + 1 < p->numverts; i++ )
++			{
++				const float *triangle[3] = { p->verts[0], p->verts[i], p->verts[i+1] };
++				int j;
++
++				if( !vertices ) pglBegin( GL_TRIANGLES );
++				for( j = 0; j < 3; j++ )
++				{
++					pglTexCoord2f( triangle[j][5], triangle[j][6] );
++					pglVertex3fv( triangle[j] );
++				}
++				vertices += 3;
++				if( vertices == STATIC_LIGHTMAP_BATCH_VERTS )
++				{
++					pglEnd();
++					vertices = 0;
++				}
++			}
++		}
++	}
++	if( vertices ) pglEnd();
++}
++
+ static qboolean R_HasLightmap( void )
+ {
+ 	if( r_fullbright->value || !WORLDMODEL->lightdata )
+@@ -982,9 +1021,14 @@
+ 		{
+ 			GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[i] );
+ 
+-			for( surf = gl_lms.lightmap_surfaces[i]; surf != NULL; surf = surf->info->lightmapchain )
++			if( r_static_lightmap_batch.value )
++				R_DrawStaticLightmapBatch( gl_lms.lightmap_surfaces[i] );
++			else
+ 			{
+-				if( surf->polys ) DrawGLPolyChain( surf->polys, 0.0f, 0.0f );
++				for( surf = gl_lms.lightmap_surfaces[i]; surf != NULL; surf = surf->info->lightmapchain )
++				{
++					if( surf->polys ) DrawGLPolyChain( surf->polys, 0.0f, 0.0f );
++				}
+ 			}
+ 		}
+ 	}

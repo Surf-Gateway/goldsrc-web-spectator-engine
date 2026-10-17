@@ -1,0 +1,163 @@
+--- a/ref/gl/gl_image.c
++++ b/ref/gl/gl_image.c
+@@ -1754,7 +1754,9 @@
+ Operates in place, quartering the size of the texture
+ =================
+ */
+-static void GL_BuildMipMap( byte *in, int srcWidth, int srcHeight, int srcDepth, int flags )
++#ifdef __EMSCRIPTEN__
++#include <stdint.h>
++static __attribute__((noinline)) void SGOriginalBuildMipMap( byte *in, int srcWidth, int srcHeight, int srcDepth, int flags )
+ {
+ 	byte	*out = in;
+ 	int	instride = ALIGN( srcWidth * 4, 1 );
+@@ -1837,6 +1839,115 @@
+ 		}
+ 	}
+ }
++static void GL_BuildMipMap(byte *in,int w,int h,int depth,int flags)
++{
++    byte *out;
++    const uint32_t mask=0x00ff00ffu;
++    int x,y;
++    if(!r_mip_rgba_pairs.value || !in || depth!=1 || w<2 || h<2 ||
++       FBitSet(flags,TF_NORMALMAP|TF_ALPHACONTRAST)) {
++        SGOriginalBuildMipMap(in,w,h,depth,flags);return;
++    }
++    out=in;
++    for(y=0;y<(h>>1);y++) {
++        const byte *row=in+(size_t)y*2*w*4;
++        const byte *next=row+(size_t)w*4;
++        for(x=0;x<(w>>1);x++,out+=4) {
++            uint32_t a,b,c,d,result,rb,ga;
++            memcpy(&a,row+(size_t)x*8,4);memcpy(&b,row+(size_t)x*8+4,4);
++            memcpy(&c,next+(size_t)x*8,4);memcpy(&d,next+(size_t)x*8+4,4);
++            rb=(a&mask)+(b&mask)+(c&mask)+(d&mask);
++            ga=((a>>8)&mask)+((b>>8)&mask)+((c>>8)&mask)+((d>>8)&mask);
++            result=((rb>>2)&mask)|(((ga>>2)&mask)<<8);
++            memcpy(out,&result,4);
++        }
++    }
++}
++#else
++static void GL_BuildMipMap( byte *in, int srcWidth, int srcHeight, int srcDepth, int flags )
++{
++	byte	*out = in;
++	int	instride = ALIGN( srcWidth * 4, 1 );
++	int	mipWidth, mipHeight, outpadding;
++	int	row, x, y, z;
++	vec3_t	normal;
++
++	if( !in ) return;
++
++	mipWidth = Q_max( 1, ( srcWidth >> 1 ));
++	mipHeight = Q_max( 1, ( srcHeight >> 1 ));
++	outpadding = ALIGN( mipWidth * 4, 1 ) - mipWidth * 4;
++	row = srcWidth << 2;
++
++	if( FBitSet( flags, TF_ALPHACONTRAST ))
++	{
++		memset( in, mipWidth, mipWidth * mipHeight * 4 );
++		return;
++	}
++
++	// move through all layers
++	for( z = 0; z < srcDepth; z++ )
++	{
++		if( FBitSet( flags, TF_NORMALMAP ))
++		{
++			for( y = 0; y < mipHeight; y++, in += instride * 2, out += outpadding )
++			{
++				byte *next = ((( y << 1 ) + 1 ) < srcHeight ) ? ( in + instride ) : in;
++				for( x = 0, row = 0; x < mipWidth; x++, row += 8, out += 4 )
++				{
++					if((( x << 1 ) + 1 ) < srcWidth )
++					{
++						normal[0] = MAKE_SIGNED( in[row+0] ) + MAKE_SIGNED( in[row+4] )
++						+ MAKE_SIGNED( next[row+0] ) + MAKE_SIGNED( next[row+4] );
++						normal[1] = MAKE_SIGNED( in[row+1] ) + MAKE_SIGNED( in[row+5] )
++						+ MAKE_SIGNED( next[row+1] ) + MAKE_SIGNED( next[row+5] );
++						normal[2] = MAKE_SIGNED( in[row+2] ) + MAKE_SIGNED( in[row+6] )
++						+ MAKE_SIGNED( next[row+2] ) + MAKE_SIGNED( next[row+6] );
++					}
++					else
++					{
++						normal[0] = MAKE_SIGNED( in[row+0] ) + MAKE_SIGNED( next[row+0] );
++						normal[1] = MAKE_SIGNED( in[row+1] ) + MAKE_SIGNED( next[row+1] );
++						normal[2] = MAKE_SIGNED( in[row+2] ) + MAKE_SIGNED( next[row+2] );
++					}
++
++					if( !VectorNormalizeLength( normal ))
++						VectorSet( normal, 0.5f, 0.5f, 1.0f );
++
++					out[0] = 128 + (byte)(127.0f * normal[0]);
++					out[1] = 128 + (byte)(127.0f * normal[1]);
++					out[2] = 128 + (byte)(127.0f * normal[2]);
++					out[3] = 255;
++				}
++			}
++		}
++		else
++		{
++			for( y = 0; y < mipHeight; y++, in += instride * 2, out += outpadding )
++			{
++				byte *next = ((( y << 1 ) + 1 ) < srcHeight ) ? ( in + instride ) : in;
++				for( x = 0, row = 0; x < mipWidth; x++, row += 8, out += 4 )
++				{
++					if((( x << 1 ) + 1 ) < srcWidth )
++					{
++						out[0] = (in[row+0] + in[row+4] + next[row+0] + next[row+4]) >> 2;
++						out[1] = (in[row+1] + in[row+5] + next[row+1] + next[row+5]) >> 2;
++						out[2] = (in[row+2] + in[row+6] + next[row+2] + next[row+6]) >> 2;
++						out[3] = (in[row+3] + in[row+7] + next[row+3] + next[row+7]) >> 2;
++					}
++					else
++					{
++						out[0] = (in[row+0] + next[row+0]) >> 1;
++						out[1] = (in[row+1] + next[row+1]) >> 1;
++						out[2] = (in[row+2] + next[row+2]) >> 1;
++						out[3] = (in[row+3] + next[row+3]) >> 1;
++					}
++				}
++			}
++		}
++	}
++}
++#endif
+ 
+ static void GL_TextureImageRAW( gl_texture_t *tex, GLint side, GLint level, GLint width, GLint height, GLint depth, GLint type, const void *data )
+ {
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -43,6 +43,9 @@
+ CVAR_DEFINE_AUTO( r_studio_clip_cache, "0", FCVAR_GLCONFIG, "reuse exact clip masks within one submodel draw (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_client_states, "0", FCVAR_GLCONFIG, "hold studio vertex/color client state per submodel (experimental)" );
+ CVAR_DEFINE_AUTO( r_studio_constant_light, "0", FCVAR_GLCONFIG, "reuse original constant studio lighting per mesh" );
++#ifdef __EMSCRIPTEN__
++CVAR_DEFINE_AUTO( r_mip_rgba_pairs, "0", FCVAR_GLCONFIG, "exact packed RGBA mip reduction (candidate)" );
++#endif
+ CVAR_DEFINE_AUTO( r_gl2_alpha_reuse, "0", FCVAR_GLCONFIG, "reuse exact alpha-reference uniforms per GL2 program" );
+ CVAR_DEFINE_AUTO( r_gl2_vector_reuse, "0", FCVAR_GLCONFIG, "reuse exact color/fog uniforms per GL2 program" );
+ CVAR_DEFINE( r_vbo, "gl_vbo", "0", FCVAR_GLCONFIG, "draw world using VBO (known to be glitchy)" );
+@@ -1179,6 +1182,9 @@
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_clip_cache );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_client_states );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_studio_constant_light );
++#ifdef __EMSCRIPTEN__
++    gEngfuncs.Cvar_RegisterVariable( &r_mip_rgba_pairs );
++#endif
+ 	gEngfuncs.Cvar_RegisterVariable( &r_gl2_alpha_reuse );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_gl2_vector_reuse );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_vbo );
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -825,6 +825,9 @@
+ extern convar_t	r_studio_clip_cache;
+ extern convar_t r_studio_client_states;
+ extern convar_t r_studio_constant_light;
++#ifdef __EMSCRIPTEN__
++extern convar_t r_mip_rgba_pairs;
++#endif
+ extern convar_t r_gl2_alpha_reuse;
+ extern convar_t r_gl2_vector_reuse;
+ void SGStudioMeshCullReport( void );

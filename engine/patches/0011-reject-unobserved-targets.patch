@@ -1,0 +1,33 @@
+--- a/cl_dll/hud_spectator.cpp
++++ b/cl_dll/hud_spectator.cpp
+@@ -192,12 +192,15 @@
+ // Purpose: 
+ //-----------------------------------------------------------------------------
+ static cvar_t *sgWebTarget, *sgWebRequest;
++static cvar_t *sgWebPlayersLow, *sgWebPlayersHigh;
+ 
+ int CHudSpectator::Init()
+ {
+ 	gHUD.AddHudElem(this);
+ 	sgWebTarget = gEngfuncs.pfnRegisterVariable("_sg_web_target", "0", 0);
+ 	sgWebRequest = gEngfuncs.pfnRegisterVariable("_sg_web_request_target", "0", 0);
++	sgWebPlayersLow = gEngfuncs.pfnRegisterVariable("_sg_web_players_low", "0", 0);
++	sgWebPlayersHigh = gEngfuncs.pfnRegisterVariable("_sg_web_players_high", "0", 0);
+ 
+ 	m_iFlags |= HUD_DRAW | HUD_THINK;
+ 	m_flNextObserverInput = 0.0f;
+@@ -970,6 +973,14 @@
+ 
+ bool CHudSpectator::IsActivePlayer(cl_entity_t * ent)
+ {
++	if( gEngfuncs.IsSpectateOnly() )
++	{
++		if( !ent || ent->index < 1 || ent->index > MAX_PLAYERS ) return false;
++		cvar_t *half = ent->index <= 16 ? sgWebPlayersLow : sgWebPlayersHigh;
++		unsigned int bit = 1u << ((ent->index - 1) & 15);
++		// Baselines and roster membership cannot establish a current camera pose.
++		if( !half || !((unsigned int)half->value & bit) ) return false;
++	}
+ 	return ( ent &&
+ 			 ent->player &&
+ 			 ent->curstate.solid != SOLID_NOT &&

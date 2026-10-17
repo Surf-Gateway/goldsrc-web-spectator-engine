@@ -1,0 +1,12 @@
+diff --git a/engine/client/cl_main.c b/engine/client/cl_main.c
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -837,7 +837,7 @@ static void CL_WritePacket( void )
+ 		}
+ 
+ 		// check if we're timing out
+-		if( cls.netchan.outgoing_sequence - cls.netchan.incoming_acknowledged >= CL_UPDATE_MASK && host.realtime - cls.netchan.last_received >= CL_CONNECTION_TIMEOUT )
++		if( !cls.demoplayback && cls.netchan.outgoing_sequence - cls.netchan.incoming_acknowledged >= CL_UPDATE_MASK && host.realtime - cls.netchan.last_received >= CL_CONNECTION_TIMEOUT )
+ 		{
+ 			Con_NPrintf( 1, "^3Warning:^1 Connection Problem^7\n" );
+ 			Con_NPrintf( 2, "^1Auto-disconnect in %.1f seconds^7", cl_timeout.value - ( host.realtime - cls.netchan.last_received ));

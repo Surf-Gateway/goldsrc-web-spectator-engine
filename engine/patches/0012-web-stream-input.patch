@@ -1,0 +1,108 @@
+--- a/engine/ref_api.h
++++ b/engine/ref_api.h
+@@ -102,7 +102,8 @@
+ 	DEMO_INACTIVE = 0,
+ 	DEMO_XASH3D,
+ 	DEMO_QUAKE1,
+-	DEMO_HLDEMO
++	DEMO_HLDEMO,
++	DEMO_WEBSTREAM
+ } demo_mode;
+ 
+ typedef enum ref_window_type_e
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -951,6 +951,7 @@
+ // cl_parse_gs.c
+ //
+ void CL_ParseGoldSrcServerMessage( sizebuf_t *msg );
++qboolean CL_WebStreamActive( void );
+ 
+ //
+ // cl_scrn.c
+--- a/engine/client/cl_demo.c
++++ b/engine/client/cl_demo.c
+@@ -14,6 +14,9 @@
+ */
+ 
+ #include "common.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include "client.h"
+ #include "net_encode.h"
+ 
+@@ -220,7 +223,7 @@
+ 		return 0.0;
+ 	// HLTV's HLDEMO header has no recorded host FPS. Its network update
+ 	// cadence must not throttle interpolated rendering to MIN_FPS.
+-	if( cls.demoplayback == DEMO_HLDEMO )
++	if( cls.demoplayback == DEMO_HLDEMO || cls.demoplayback == DEMO_WEBSTREAM )
+ 		return bound( MIN_FPS, Cvar_VariableValue( "fps_max" ), MAX_FPS_HARD );
+ 	return bound( MIN_FPS, demo.header.host_fps, MAX_FPS_HARD );
+ }
+@@ -751,6 +754,25 @@
+  	cls.nextcmdtime = host.realtime;
+ 	cl.last_command_ack = -1;
+ }
++
++qboolean CL_WebStreamActive( void )
++{
++ return cls.demoplayback == DEMO_WEBSTREAM;
++}
++
++#ifdef __EMSCRIPTEN__
++EMSCRIPTEN_KEEPALIVE void SG_WebStart( void )
++{
++ cls.legacymode = PROTO_GOLDSRC;
++ CL_DemoStartPlayback( DEMO_WEBSTREAM );
++ cl.background = true;
++}
++
++EMSCRIPTEN_KEEPALIVE void SG_WebStop( void )
++{
++ if( CL_WebStreamActive() ) CL_Disconnect();
++}
++#endif
+ 
+ /*
+ =================
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -2610,6 +2610,16 @@
+ */
+ static qboolean CL_GetMessage( byte *data, size_t *length )
+ {
++#ifdef __EMSCRIPTEN__
++ if( CL_WebStreamActive() )
++ {
++  int size = EM_ASM_INT({ return Module["onSGReadPacket"] ? Module["onSGReadPacket"]($0, $1, HEAPU8) : 0; }, data, MAX_INIT_MSG);
++  if( size <= 0 || size > MAX_INIT_MSG ) return false;
++  cls.netchan.incoming_sequence = EM_ASM_INT({ return Module["sgPacketSequence"] | 0; });
++  *length = size;
++  return true;
++ }
++#endif
+ 	if( cls.demoplayback )
+ 		return CL_DemoReadMessage( data, length );
+ 
+@@ -2724,7 +2734,7 @@
+ 
+ 	// HLDEMO frames are already complete payloads. Netchan fragment
+ 	// reassembly shares net_message and must not run during playback.
+-	if( cls.demoplayback != DEMO_HLDEMO && cls.state != ca_disconnected && Netchan_IncomingReady( &cls.netchan ))
++	if( cls.demoplayback != DEMO_HLDEMO && !CL_WebStreamActive() && cls.state != ca_disconnected && Netchan_IncomingReady( &cls.netchan ))
+ 	{
+ 		// process the incoming buffer(s)
+ 		if( Netchan_CopyNormalFragments( &cls.netchan, &net_message, &curSize ))
+--- a/engine/client/cl_parse_gs.c
++++ b/engine/client/cl_parse_gs.c
+@@ -619,6 +619,8 @@
+ 			break;
+ 		case svc_stufftext:
+ 			s = MSG_ReadString( msg );
++			// Web spectators consume native world data, never upstream console commands.
++			if( CL_WebStreamActive() ) break;
+ 			if( cl_trace_stufftext.value )
+ 			{
+ 				size_t len = Q_strlen( s );

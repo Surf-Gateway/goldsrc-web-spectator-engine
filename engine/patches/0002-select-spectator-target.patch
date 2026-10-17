@@ -1,0 +1,147 @@
+diff --git a/cl_dll/hud_spectator.cpp b/cl_dll/hud_spectator.cpp
+index d21e2e2..09c23a8 100644
+--- a/cl_dll/hud_spectator.cpp
++++ b/cl_dll/hud_spectator.cpp
+@@ -191,9 +191,13 @@ void SpecPip( void )
+ //-----------------------------------------------------------------------------
+ // Purpose: 
+ //-----------------------------------------------------------------------------
++static cvar_t *sgWebTarget, *sgWebRequest;
++
+ int CHudSpectator::Init()
+ {
+ 	gHUD.AddHudElem(this);
++	sgWebTarget = gEngfuncs.pfnRegisterVariable("_sg_web_target", "0", 0);
++	sgWebRequest = gEngfuncs.pfnRegisterVariable("_sg_web_request_target", "0", 0);
+ 
+ 	m_iFlags |= HUD_DRAW | HUD_THINK;
+ 	m_flNextObserverInput = 0.0f;
+@@ -749,6 +753,7 @@ void CHudSpectator::FindNextPlayer(bool bReverse)
+ 		// MOD AUTHORS: Add checks on target here.
+ 
+ 		g_iUser2 = iCurrent;
++
+ 		break;
+ 
+ 	} while ( iCurrent != iStart );
+@@ -957,10 +962,6 @@ void CHudSpectator::SetModes(int iNewMainMode, int iNewInsetMode)
+ 			break;
+ 		}
+ 
+-		char string[128];
+-		sprintf(string, "#Spec_Mode%d", g_iUser1 );
+-		sprintf(string, "%c%s", HUD_PRINTCENTER, CHudTextMessage::BufferedLocaliseTextString( string ));
+-		gHUD.m_TextMessage.MsgFunc_TextMsg(NULL, strlen(string)+1, string );
+ 	}
+ 
+ 	//gViewPort->UpdateSpectatorPanel();
+@@ -972,7 +973,7 @@ bool CHudSpectator::IsActivePlayer(cl_entity_t * ent)
+ 	return ( ent &&
+ 			 ent->player &&
+ 			 ent->curstate.solid != SOLID_NOT &&
+-			ent != gEngfuncs.GetLocalPlayer() &&
++			( gEngfuncs.IsSpectateOnly() || ent != gEngfuncs.GetLocalPlayer() ) &&
+ 			g_PlayerInfoList[ent->index].name != NULL
+ 			);
+ }
+@@ -1756,6 +1757,39 @@ void CHudSpectator::Reset()
+ 	SetSpectatorStartPosition();
+ }
+ 
++void CHudSpectator::EnsureTarget()
++{
++	if( !gEngfuncs.IsSpectateOnly() )
++	{
++		if( sgWebTarget && sgWebTarget->value != 0 ) gEngfuncs.Cvar_SetValue( "_sg_web_target", 0 );
++		return;
++	}
++	// Local browser selection; only an active player can become the camera.
++	if( sgWebRequest && sgWebRequest->value != 0 )
++	{
++		int slot = (int)sgWebRequest->value;
++		gEngfuncs.Cvar_SetValue( "_sg_web_request_target", 0 );
++		if( slot >= 1 && slot <= MAX_PLAYERS && IsActivePlayer( gEngfuncs.GetEntityByIndex( slot ) ) )
++			g_iUser2 = slot;
++	}
++	g_iUser1 = OBS_IN_EYE;
++	m_pip->value = INSET_OFF;
++	if( !IsActivePlayer( gEngfuncs.GetEntityByIndex( g_iUser2 ) ) )
++	{
++		static float lastSearch = -1000.0f;
++		float now = gEngfuncs.GetClientTime();
++		g_iUser2 = 0;
++		// Bound empty-server searches; a rewound clock resets the retry window.
++		if( now < lastSearch || now - lastSearch >= 0.5f )
++		{
++			lastSearch = now;
++			FindNextPlayer( false );
++		}
++	}
++	// The engine reads the cvar string; changing value alone leaves it at zero.
++	if( sgWebTarget && sgWebTarget->value != g_iUser2 ) gEngfuncs.Cvar_SetValue( "_sg_web_target", g_iUser2 );
++}
++
+ void CHudSpectator::InitHUDData()
+ {
+ 	m_lastPrimaryObject = m_lastSecondaryObject = 0;
+@@ -1768,10 +1801,8 @@ void CHudSpectator::InitHUDData()
+ 	memset( &m_OverviewData, 0, sizeof(m_OverviewData));
+ 	memset( &m_OverviewEntities, 0, sizeof(m_OverviewEntities));
+ 
+-	if ( gEngfuncs.IsSpectateOnly() || gEngfuncs.pDemoAPI->IsPlayingback() )
+-		m_autoDirector->value = 1.0f;
+-	else
+-		m_autoDirector->value = 0.0f;
++	// The spectator app chooses the player. Director commands must not replace that choice.
++	m_autoDirector->value = 0.0f;
+ 
+ 	Reset();
+ 
+diff --git a/cl_dll/hud_spectator.h b/cl_dll/hud_spectator.h
+index 26ef700..2e927f7 100644
+--- a/cl_dll/hud_spectator.h
++++ b/cl_dll/hud_spectator.h
+@@ -76,6 +76,7 @@ public:
+ 	void HandleButtonsDown(int ButtonPressed);
+ 	void HandleButtonsUp(int ButtonPressed);
+ 	void FindNextPlayer( bool bReverse );
++	void EnsureTarget();
+ 	void DirectorMessage( int iSize, void *pbuf );
+ 	void SetSpectatorStartPosition();
+ 	CHudMsgFunc(Spectator);
+diff --git a/cl_dll/entity.cpp b/cl_dll/entity.cpp
+--- a/cl_dll/entity.cpp
++++ b/cl_dll/entity.cpp
+@@ -153,7 +153,15 @@ void DLLEXPORT HUD_ProcessPlayerState( struct entity_state_s *dst, const struct entity_state_s *src )
+ 		g_iTeamNumber = g_PlayerExtraInfo[dst->number].teamnumber;
+ 
+-		dst->iuser1 = g_iUser1 = src->iuser1;
+-		dst->iuser2 = g_iUser2 = src->iuser2;
+-		dst->iuser3 = g_iUser3 = src->iuser3;
++		dst->iuser1 = src->iuser1;
++		dst->iuser2 = src->iuser2;
++		dst->iuser3 = src->iuser3;
++		// HLTV observer mode and target belong to this viewer. A recorded
++		// player's iuser fields must not replace the locally selected POV.
++		if( !gEngfuncs.IsSpectateOnly() )
++		{
++			g_iUser1 = src->iuser1;
++			g_iUser2 = src->iuser2;
++			g_iUser3 = src->iuser3;
++		}
+ 	}
+ 	dst->fuser2					= src->fuser2;
+diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
+index afbfbab..91a24a2 100644
+--- a/cl_dll/view.cpp
++++ b/cl_dll/view.cpp
+@@ -1841,4 +1841,9 @@ void DLLEXPORT V_CalcRefdef( struct ref_params_s *pparams )
+ {
++	// Player-state transfer may reset g_iUser1 to zero on every HLTV update.
++	// Establish the local observer mode before choosing the camera path.
++	// Calling this inside V_CalcSpectatorRefdef cannot enter that path.
++	gHUD.m_Spectator.EnsureTarget();
++
+ 	// intermission / finale rendering
+ 	if ( pparams->intermission )
+ 	{
