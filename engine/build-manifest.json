@@ -49,7 +49,8 @@
         "0047-selective-bounds-membership.patch": "6aaa489995820185fde4b868f5931c8f68a8add9e9de09421fa00fd06121ab14",
         "0048-studio-background-realize.patch": "9e0c387c44d27205e01a0f0919d89b13d1f3636cda005cc06c70494e6748c031",
         "0049-studio-texture-budget.patch": "255e16109a162914709869a0a6021ad3205750da8104f48407668aebc410b2ce",
-        "0050-studio-reduced-texture-storage.patch": "f1128a89f0e0b2ddf68eee6c8952a5cdc7e7db17d9b1d562951fb592d676a88b"
+        "0050-studio-reduced-texture-storage.patch": "f1128a89f0e0b2ddf68eee6c8952a5cdc7e7db17d9b1d562951fb592d676a88b",
+        "0051-goldsrc-sky-names.patch": "99278da8e2107b346ddfcd4b159d246048fa1d417499b2414f81cddc8073c2db"
       },
       "generatedRuntime": {
         "schemaVersion": 1,
@@ -85,8 +86,8 @@
     },
     {
       "path": "xash3d-fwgs/build/engine/xash.wasm",
-      "bytes": 4142040,
-      "sha256": "cfa12ced5781b07555e7a499f183d9a6b93755ffce89eaf6d5a3d111c7360fa4"
+      "bytes": 4142026,
+      "sha256": "eba56e433943a2a4b18fca03d4097d099c94e506fd9509f2619a1ad52a8e5f7d"
     },
     {
       "path": "xash3d-fwgs/build/filesystem/filesystem_stdio.wasm",
@@ -106,7 +107,7 @@
     {
       "path": "cs16-client/build/cl_dll/client_emscripten_javascript.wasm",
       "bytes": 381050,
-      "sha256": "2093365afcfe50ef3c6ec6d22fe026df5dc40dd0fbce72518721b1e9157f594f"
+      "sha256": "a7e9c246024456d6e8f491e30d34999414cfe07dadaa42eca10c9d29b9c99013"
     },
     {
       "path": "cs16-client/build/3rdparty/mainui_cpp/menu_emscripten_javascript.wasm",

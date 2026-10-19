@@ -1,0 +1,31 @@
+--- a/engine/client/ref_common.c
++++ b/engine/client/ref_common.c
+@@ -95,14 +95,22 @@
+ 	}
+ 
+ 	Q_snprintf( loadname, sizeof( loadname ), "gfx/env/%s", name );
+-	COM_StripExtension( loadname );
+ 
+-	// kill the underline suffix to find them manually later
+-	len = Q_strlen( loadname );
++	// GoldSrc keeps the whole sky name: "sky_dios.camp1" loads
++	// gfx/env/sky_dios.camp1rt.tga. Try that first, then Xash's own rules.
++	result = Q_strchr( name, '.' ) ? CheckSkybox( loadname, sidenames ) : false;
+ 
+-	if( loadname[len - 1] == '_' )
+-		loadname[len - 1] = '\0';
+-	result = CheckSkybox( loadname, sidenames );
++	if( !result )
++	{
++		COM_StripExtension( loadname );
++
++		// kill the underline suffix to find them manually later
++		len = Q_strlen( loadname );
++
++		if( loadname[len - 1] == '_' )
++			loadname[len - 1] = '\0';
++		result = CheckSkybox( loadname, sidenames );
++	}
+ 
+ 	// to prevent infinite recursion if default skybox was missed
+ 	if( !result && Q_stricmp( name, DEFAULT_SKYBOX_NAME ))
