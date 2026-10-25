@@ -1,0 +1,63 @@
+--- a/engine/common/mod_bmodel.c
++++ b/engine/common/mod_bmodel.c
+@@ -1600,6 +1600,32 @@
+ 	CountClipNodes32_r( src, hull, src[nodenum].children[1] );
+ }
+ 
++/*
++==================
++LastClipNode_r
++
++The highest node a submodel's tree reaches. Editors can leave unused nodes
++between a model's nodes, so a tree may reach past headnode + count. GoldSrc
++does not range-check traces, so such maps (surf_slides_ground) play there.
++Called after CountClipNodes_r, which bounds the walk.
++==================
++*/
++static int LastClipNode16_r( const mclipnode16_t *src, int nodenum, int last )
++{
++	if( nodenum < 0 ) return last;
++	last = Q_max( last, nodenum );
++	last = LastClipNode16_r( src, src[nodenum].children[0], last );
++	return LastClipNode16_r( src, src[nodenum].children[1], last );
++}
++
++static int LastClipNode32_r( const mclipnode32_t *src, int nodenum, int last )
++{
++	if( nodenum < 0 ) return last;
++	last = Q_max( last, nodenum );
++	last = LastClipNode32_r( src, src[nodenum].children[0], last );
++	return LastClipNode32_r( src, src[nodenum].children[1], last );
++}
++
+ static void CountDClipNodes_r( dclipnode32_t *src, hull_t *hull, int nodenum, const int max_clipnodes )
+ {
+ 	// leaf?
+@@ -1928,7 +1954,7 @@
+ 	for( i = 0; i < mod->numsubmodels; i++ )
+ 	{
+ 		dmodel_t *bm = &mod->submodels[i];
+-		int j;
++		int j, last;
+ 
+ 		// hull 0 is just shared across all bmodels
+ 		mod->hulls[0].firstclipnode = bm->headnode[0];
+@@ -1936,9 +1962,18 @@
+ 
+ 		// counting a real number of clipnodes per each submodel
+ 		if( bmod->version == QBSP2_VERSION )
++		{
+ 			CountClipNodes32_r( mod->hulls[0].clipnodes32, &mod->hulls[0], bm->headnode[0] );
++			last = LastClipNode32_r( mod->hulls[0].clipnodes32, bm->headnode[0], -1 ) + 1;
++		}
+ 		else
++		{
+ 			CountClipNodes16_r( mod->hulls[0].clipnodes16, &mod->hulls[0], bm->headnode[0] );
++			last = LastClipNode16_r( mod->hulls[0].clipnodes16, bm->headnode[0], -1 ) + 1;
++		}
++
++		// unchanged when the nodes form one block; reaches unused gaps otherwise
++		mod->hulls[0].lastclipnode = Q_max( mod->hulls[0].lastclipnode, last );
+ 
+ 		// but hulls1-3 is build individually for a each given submodel
+ 		for( j = 1; j < MAX_MAP_HULLS; j++ )

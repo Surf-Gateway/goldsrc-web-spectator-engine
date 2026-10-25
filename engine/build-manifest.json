@@ -50,7 +50,8 @@
         "0048-studio-background-realize.patch": "9e0c387c44d27205e01a0f0919d89b13d1f3636cda005cc06c70494e6748c031",
         "0049-studio-texture-budget.patch": "255e16109a162914709869a0a6021ad3205750da8104f48407668aebc410b2ce",
         "0050-studio-reduced-texture-storage.patch": "f1128a89f0e0b2ddf68eee6c8952a5cdc7e7db17d9b1d562951fb592d676a88b",
-        "0051-goldsrc-sky-names.patch": "99278da8e2107b346ddfcd4b159d246048fa1d417499b2414f81cddc8073c2db"
+        "0051-goldsrc-sky-names.patch": "99278da8e2107b346ddfcd4b159d246048fa1d417499b2414f81cddc8073c2db",
+        "0052-sparse-submodel-hull-nodes.patch": "022a6e0d5f41f1b9bebc8639a3c9a7cf795a702cb740b1ceffcdb50bfe19f9ad"
       },
       "generatedRuntime": {
         "schemaVersion": 1,
@@ -86,8 +87,8 @@
     },
     {
       "path": "xash3d-fwgs/build/engine/xash.wasm",
-      "bytes": 4142026,
-      "sha256": "eba56e433943a2a4b18fca03d4097d099c94e506fd9509f2619a1ad52a8e5f7d"
+      "bytes": 4142207,
+      "sha256": "69d6d79c8a55502bbbf8360847a52173f7d20d308ac94868c398f6ec575b1dad"
     },
     {
       "path": "xash3d-fwgs/build/filesystem/filesystem_stdio.wasm",
@@ -107,7 +108,7 @@
     {
       "path": "cs16-client/build/cl_dll/client_emscripten_javascript.wasm",
       "bytes": 381050,
-      "sha256": "a7e9c246024456d6e8f491e30d34999414cfe07dadaa42eca10c9d29b9c99013"
+      "sha256": "6c7fca1cdc45e62746599cbbb355dfd87fd44fbc9114063e20020ef599dffd27"
     },
     {
       "path": "cs16-client/build/3rdparty/mainui_cpp/menu_emscripten_javascript.wasm",
