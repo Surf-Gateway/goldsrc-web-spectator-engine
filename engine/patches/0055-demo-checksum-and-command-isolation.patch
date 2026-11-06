@@ -1,0 +1,116 @@
+--- a/engine/client/demo_view.h
++++ b/engine/client/demo_view.h
+@@ -32,4 +32,9 @@
+  if(v.ground<0||v.ground>1||v.water<0||v.water>3||v.health< -100000||v.health>100000)return -1;
+  *out=v;return 1;
+ }
++/* A zero header and zero raw network CRC are the converter's absent-checksum
++ * profile. A nonzero recorded checksum always retains normal validation. */
++static int SG_DemoChecksumMissing( int active, uint32_t header, uint32_t raw ) {
++ return active && header == 0 && raw == 0;
++}
+ #endif
+--- a/engine/client/cl_demo.c
++++ b/engine/client/cl_demo.c
+@@ -1559,12 +1559,23 @@
+ 
+ static sg_demo_view_t sgDemoView;
+ static qboolean sgDemoViewValid;
++static uint32_t sgDemoMapCrc;
+ static int sgDemoMode = -1;
+ 
+ static qboolean CL_WebDemoEnabled( void )
+ {
+  if( sgDemoMode < 0 ) sgDemoMode = Sys_CheckParm( "-sg-demo-playback" ) != 0;
+  return sgDemoMode != 0;
++}
++
++qboolean CL_WebDemoActive( void )
++{
++ return CL_WebDemoEnabled() && cls.demoplayback == DEMO_HLDEMO;
++}
++
++qboolean CL_WebDemoChecksumAbsent( uint32_t raw )
++{
++ return SG_DemoChecksumMissing( CL_WebDemoActive(), sgDemoMapCrc, raw );
+ }
+ 
+ int CL_WebDemoPlayer( void )
+@@ -1727,6 +1738,7 @@
+ 	}
+ 
+ 	cls.legacymode = PROTO_GOLDSRC;
++ sgDemoMapCrc = (uint32_t)map_crc;
+ 	CL_DemoStartPlayback( DEMO_HLDEMO );
+ 	cl.background = true;
+ 	Con_Printf( "HLDEMO: map %s, game %s\n", map_name, game_dir );
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -774,6 +774,8 @@
+ qboolean CL_DemoReadMessage( byte *buffer, size_t *length );
+ void CL_DemoInterpolateAngles( void );
+ int CL_WebDemoPlayer( void );
++qboolean CL_WebDemoActive( void );
++qboolean CL_WebDemoChecksumAbsent( uint32_t raw );
+ const float *CL_WebDemoOrigin( void );
+ double CL_WebDemoDisplayTime( void );
+ void CL_WebDemoView( ref_params_t *rp, qboolean afterClient );
+--- a/engine/client/cl_parse.c
++++ b/engine/client/cl_parse.c
+@@ -861,7 +861,7 @@
+ {
+ 	char	gamefolder[MAX_QPATH];
+ 	string	mapfile;
+-	qboolean	background;
++	qboolean	background, unverifiedDemoMap;
+ 	int	i, required_version;
+ 	uint32_t	mapCRC;
+ 
+@@ -902,6 +902,7 @@
+ 
+ 	cl.servercount = MSG_ReadLong( msg );
+ 	cl.checksum = MSG_ReadLong( msg );
++ unverifiedDemoMap = proto == PROTO_GOLDSRC && CL_WebDemoChecksumAbsent( cl.checksum );
+ 	if( proto == PROTO_GOLDSRC )
+ 	{
+ 		byte clientdllmd5[16];
+@@ -974,13 +975,16 @@
+ 	if( CRC32_MapFile( &cl.worldmapCRC, mapfile, cl.maxclients > 1 ))
+ 	{
+ 		// validate map checksum
+-		if( cl.worldmapCRC != cl.checksum )
++		if( cl.worldmapCRC != cl.checksum && !unverifiedDemoMap )
+ 		{
+ 			Con_Printf( S_ERROR "Your map [%s] differs from the server's.\n", clgame.mapname );
+ 			CL_Disconnect_f(); // for local game, call EndGame
+ 			Host_AbortCurrentFrame(); // to avoid svc_bad
+ 		}
+ 	}
++
++	if( unverifiedDemoMap )
++  Con_Printf( "HLDEMO: no recorded map checksum; using the prepared map.\n" );
+ 
+ 	if( clgame.maxModels > MAX_MODELS )
+ 		Con_Printf( S_WARN "server model limit is above client model limit %i > %i\n", clgame.maxModels, MAX_MODELS );
+--- a/engine/client/cl_parse_gs.c
++++ b/engine/client/cl_parse_gs.c
+@@ -620,7 +620,7 @@
+ 		case svc_stufftext:
+ 			s = MSG_ReadString( msg );
+ 			// Web spectators consume native world data, never upstream console commands.
+-			if( CL_WebStreamActive() ) break;
++			if( CL_WebStreamActive() || CL_WebDemoActive() ) break;
+ 			if( cl_trace_stufftext.value )
+ 			{
+ 				size_t len = Q_strlen( s );
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -607,7 +607,7 @@
+ 		CL_DrawHUD( CL_CHANGELEVEL );
+ 		ref.dllFuncs.R_ShowTextures();
+ 		R_ShowTree();
+-		if(!CL_WebStreamActive()) Con_DrawConsole();
++		if(!CL_WebStreamActive() && !CL_WebDemoActive()) Con_DrawConsole();
+ 		UI_UpdateMenu( host.realtime );
+ 		Con_DrawVersion();
+ 		Con_DrawDebug(); // must be last

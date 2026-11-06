@@ -51,7 +51,13 @@
         "0049-studio-texture-budget.patch": "255e16109a162914709869a0a6021ad3205750da8104f48407668aebc410b2ce",
         "0050-studio-reduced-texture-storage.patch": "f1128a89f0e0b2ddf68eee6c8952a5cdc7e7db17d9b1d562951fb592d676a88b",
         "0051-goldsrc-sky-names.patch": "99278da8e2107b346ddfcd4b159d246048fa1d417499b2414f81cddc8073c2db",
-        "0052-sparse-submodel-hull-nodes.patch": "022a6e0d5f41f1b9bebc8639a3c9a7cf795a702cb740b1ceffcdb50bfe19f9ad"
+        "0052-sparse-submodel-hull-nodes.patch": "022a6e0d5f41f1b9bebc8639a3c9a7cf795a702cb740b1ceffcdb50bfe19f9ad",
+        "0053-browser-map-brightness.patch": "e551b357f4889f75fb5796204dd4f7fb46f370fc3dae00862a3b44a90bde74a0",
+        "0054-player-demo-camera.patch": "faf15742a714a60ee5f454a9925b0c574075b3a9a3300452da04f7868d771568",
+        "0055-demo-checksum-and-command-isolation.patch": "0b9529132f702e559eac02c01830ad54220396af754aa39ff5868f5002c136a1",
+        "0056-recorded-playback-controls.patch": "e59e539bb2a5753a28b185cf8e7fceb6b6e21014b76b2ae12c77baf47909fc19",
+        "0057-recorded-client-data.patch": "ae389726a9bae557d083981ac49f99d891a32052468bf985f9f80d8c0a6c4c84",
+        "0058-recorded-effects.patch": "878666397c97fa1d77db1d60d1ba36e7eaacea3c7a1c84783e101c0da47328a7"
       },
       "generatedRuntime": {
         "schemaVersion": 1,
@@ -82,13 +88,13 @@
   "artifacts": [
     {
       "path": "xash3d-fwgs/build/engine/xash.js",
-      "bytes": 532792,
-      "sha256": "42ba6b862deb5e6f38943cc9dd104abc484780e99597acf8ea762580c5c973d3"
+      "bytes": 533270,
+      "sha256": "dc6c6096926eed9e254be661d8f76434d9618fae0a83534cd764f39a13d893a4"
     },
     {
       "path": "xash3d-fwgs/build/engine/xash.wasm",
-      "bytes": 4142207,
-      "sha256": "69d6d79c8a55502bbbf8360847a52173f7d20d308ac94868c398f6ec575b1dad"
+      "bytes": 4151712,
+      "sha256": "920b6b3c5b8fbbb0353e7448a8444fad4666e61c045c38ab56029f866babf05a"
     },
     {
       "path": "xash3d-fwgs/build/filesystem/filesystem_stdio.wasm",
@@ -97,8 +103,8 @@
     },
     {
       "path": "xash3d-fwgs/build/ref/gl/libref_gles3compat.wasm",
-      "bytes": 334007,
-      "sha256": "a12e9f3812052781c1ce9c34621a1300f4c772e182a25672db7a1df551c085e6"
+      "bytes": 334238,
+      "sha256": "1827454e51befbf72ca647314572b64df5b6b53c8378c9885d8e728a33db1adc"
     },
     {
       "path": "xash3d-fwgs/build/3rdparty/mainui/libmenu.wasm",
@@ -108,7 +114,7 @@
     {
       "path": "cs16-client/build/cl_dll/client_emscripten_javascript.wasm",
       "bytes": 381050,
-      "sha256": "6c7fca1cdc45e62746599cbbb355dfd87fd44fbc9114063e20020ef599dffd27"
+      "sha256": "cc1805e25c2cfaa174d7ae659fd311cd8ff6a4e541871a0eb748a3d4e24b12d4"
     },
     {
       "path": "cs16-client/build/3rdparty/mainui_cpp/menu_emscripten_javascript.wasm",
@@ -127,8 +133,8 @@
       },
       "factorySha256": "40429ad1ceea01b5d767e10251b821ccbc571af9ecf59f37fb55f8f48c123e6e",
       "indexFactorySha256": "6c37e2c5ddf4aec145bc25775eb6b7c8c8e0166321d46d101da16dbfdbb73087",
-      "runtimeBeforeSha256": "0fe5062b06e9c318f1946bb672e441f5b3fc108b9aa9deb8aa4683286467573d",
-      "runtimeAfterSha256": "42ba6b862deb5e6f38943cc9dd104abc484780e99597acf8ea762580c5c973d3",
+      "runtimeBeforeSha256": "99c13db681ad0d5a75bc5a5f1a6f3ab370f895b318c74311b0ff1d4661a2deee",
+      "runtimeAfterSha256": "dc6c6096926eed9e254be661d8f76434d9618fae0a83534cd764f39a13d893a4",
       "scope": "Private temporary attribute/index prefix uploads and exact unsigned maximum scanning; bounded CPU shadows; optional per-frame temporary buffer rings; independent explicit Module opt-ins."
     }
   }

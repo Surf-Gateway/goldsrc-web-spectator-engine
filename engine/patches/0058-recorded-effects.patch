@@ -1,0 +1,172 @@
+--- /dev/null
++++ b/engine/client/demo_effects.h
+@@ -0,0 +1,35 @@
++/* GoldSrc file-only numeric event and relative sound-name guards. */
++#ifndef SG_DEMO_EFFECTS_H
++#define SG_DEMO_EFFECTS_H
++#include <stdint.h>
++#include <string.h>
++#include <math.h>
++static int32_t SG_DEInt(const unsigned char *p){int32_t n;memcpy(&n,p,4);return n;}
++static float SG_DEFloat(const unsigned char *p){float n;memcpy(&n,p,4);return n;}
++static int SG_DemoEventValid(const unsigned char *b,int size,int maxevents){
++ int i;float v;
++ if(!b || size!=84 || SG_DEInt(b)<0 || SG_DEInt(b)>127 || SG_DEInt(b+4)<1 || SG_DEInt(b+4)>=maxevents)return 0;
++ v=SG_DEFloat(b+8);if(!isfinite(v)||v<0||v>60)return 0;
++ if(SG_DEInt(b+12)<0||SG_DEInt(b+12)>3||SG_DEInt(b+16)<1||SG_DEInt(b+16)>32||SG_DEInt(b+56)<0||SG_DEInt(b+56)>1)return 0;
++ for(i=0;i<9;i++){v=SG_DEFloat(b+20+i*4);if(!isfinite(v)||fabsf(v)>((i>=3&&i<6)?360000.0f:131072.0f))return 0;}
++ for(i=0;i<2;i++){v=SG_DEFloat(b+60+i*4);if(!isfinite(v)||fabsf(v)>131072.0f)return 0;}
++ if(SG_DEInt(b+68)<-65535||SG_DEInt(b+68)>65535||SG_DEInt(b+72)<-65535||SG_DEInt(b+72)>65535)return 0;
++ if(SG_DEInt(b+76)<0||SG_DEInt(b+76)>1||SG_DEInt(b+80)<0||SG_DEInt(b+80)>1)return 0;
++ return 1;
++}
++static int SG_DemoSoundName(const unsigned char *b,int size){
++ int i,n,start=0;unsigned char c;
++ if(!b||size<1||size>255)return 0;
++ for(n=0;n<size&&b[n];n++){ }if(n<1)return 0;
++ if(b[0]=='!'){for(i=1;i<n;i++){c=b[i];if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'))return 0;}return n>1;}
++ for(i=0;i<=n;i++){
++  c=i<n?b[i]:'/';
++  if(c=='/'){if(i==start||(i-start==1&&b[start]=='.')||(i-start==2&&b[start]=='.'&&b[start+1]=='.'))return 0;start=i+1;continue;}
++  if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'||c=='.'||c==' '||c=='@'||c=='('||c==')'||c=='['||c==']'))return 0;
++ }
++ return 1;
++}
++static int SG_DemoSoundValues(int channel,float attn,float volume,int flags,int pitch){
++ return channel>=0&&channel<=7&&isfinite(attn)&&attn>=0&&attn<=4&&isfinite(volume)&&volume>=0&&volume<=1&&flags>=0&&flags<=2047&&pitch>=1&&pitch<=255;
++}
++#endif
+--- a/engine/client/cl_demo.c
++++ b/engine/client/cl_demo.c
+@@ -20,6 +20,7 @@
+ #include "client.h"
+ #include "demo_view.h"
+ #include "demo_client.h"
++#include "demo_effects.h"
+ #include "net_encode.h"
+ 
+ #define dem_unknown		0	// unknown command
+@@ -1587,6 +1588,7 @@
+ static int sgDemoSeeking, sgDemoWaitPicture, sgDemoEnded, sgDemoError;
+ static int sgDemoBudgetFrame = -1, sgDemoRecords, sgDemoPackets, sgDemoTotalRecords;
+ static float sgDemoRecordTime;
++static int sgDemoLocalEvents,sgDemoLocalSounds;
+ 
+ qboolean CL_WebDemoPaused( void )
+ {
+@@ -1662,7 +1664,7 @@
+  position = sgDemoPosition;
+  if( phase == 2 && hldemo_directory.index < hldemo_directory.count && hldemo_directory.type[hldemo_directory.index] == 1 )
+   position = bound( sgDemoPosition, sgDemoOffset + CL_GetDemoPlaybackClock() - demo.starttime, 86400 );
+- EM_ASM({ if(Module["onSGDemoTick"]) Module["onSGDemoTick"]($0,$1,$2,$3,$4,$5,$6,$7,$8); }, phase, position, mode, sgDemoResumeRate, sgDemoTarget, sgDemoError, xy, xyz, cl.local.scr_fov);
++ EM_ASM({ if(Module["onSGDemoTick"]) Module["onSGDemoTick"]($0,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10); }, phase, position, mode, sgDemoResumeRate, sgDemoTarget, sgDemoError, xy, xyz, cl.local.scr_fov, sgDemoLocalEvents, sgDemoLocalSounds);
+ }
+ #endif
+ 
+@@ -1786,6 +1788,7 @@
+   sgDemoPosition = sgDemoOffset = 0;
+   sgDemoRecordTime = 0;
+   sgDemoTotalRecords = sgDemoEnded = sgDemoError = sgDemoWaitPicture = 0;
++  sgDemoLocalEvents = sgDemoLocalSounds = 0;
+   sgDemoBudgetFrame = -1;
+   sgDemoTarget = sgDemoPending;
+   sgDemoPending = -1;
+@@ -1972,7 +1975,14 @@
+ 
+ 		if( cmd == 6 )
+ 		{
+-			if( !CL_GoldSrcSkip( 84 )) { CL_GoldSrcFailure(); return false; }
++   byte data[84]; event_args_t args;
++   if( !CL_GoldSrcRead(data,sizeof(data)) ) { CL_GoldSrcFailure(); return false; }
++   if( CL_WebDemoActive() )
++   {
++    if( sizeof(args)!=72 || !SG_DemoEventValid(data,sizeof(data),MAX_EVENTS) ) { CL_GoldSrcFailure(); return false; }
++    memcpy(&args,data+12,72);
++    if( !sgDemoSeeking && CL_WebDemoEvent(SG_DEInt(data),SG_DEInt(data+4),SG_DEFloat(data+8),&args) ) sgDemoLocalEvents++;
++   }
+ 			continue;
+ 		}
+ 
+@@ -1990,16 +2000,20 @@
+ 
+ 		if( cmd == 8 )
+ 		{
+-			int channel, sample_size;
+-
+-			if( !CL_GoldSrcRead( &channel, sizeof( channel ))
+-				|| !CL_GoldSrcRead( &sample_size, sizeof( sample_size ))
+-				|| sample_size < 0 || sample_size > INT_MAX - 16
+-				|| !CL_GoldSrcSkip( sample_size + 16 ))
+-			{
+-				CL_GoldSrcFailure();
+-				return false;
+-			}
++   int channel, size, flags, pitch; float attn, volume; byte sample[256]; sound_t sound;
++   if( !CL_GoldSrcRead(&channel,4) || !CL_GoldSrcRead(&size,4) || size<1 || size>255 ||
++    !CL_GoldSrcRead(sample,size) || !CL_GoldSrcRead(&attn,4) || !CL_GoldSrcRead(&volume,4) ||
++    !CL_GoldSrcRead(&flags,4) || !CL_GoldSrcRead(&pitch,4) ) { CL_GoldSrcFailure(); return false; }
++   sample[size]=0;
++   if( CL_WebDemoActive() )
++   {
++    if(!SG_DemoSoundName(sample,size)||!SG_DemoSoundValues(channel,attn,volume,flags,pitch)) { CL_GoldSrcFailure(); return false; }
++    if(!sgDemoSeeking && cl.audio_prepped)
++    {
++     sound=S_RegisterSound((const char *)sample);
++     if(sound) { S_StartSound(NULL,cl.viewentity,channel,sound,volume,attn,pitch,flags);sgDemoLocalSounds++; }
++    }
++   }
+ 			continue;
+ 		}
+ 
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -777,6 +777,7 @@
+ qboolean CL_WebDemoActive( void );
+ qboolean CL_WebDemoPaused( void );
+ void CL_WebDemoFailure( void );
++qboolean CL_WebDemoEvent( int flags, int index, float delay, event_args_t *args );
+ qboolean CL_WebDemoSeeking( void );
+ void CL_WebDemoPresented( void );
+ qboolean CL_WebDemoChecksumAbsent( uint32_t raw );
+--- a/engine/client/cl_events.c
++++ b/engine/client/cl_events.c
+@@ -354,6 +354,7 @@
+ {
+ 	event_info_t	*ei;
+ 
++	if( CL_WebDemoSeeking() ) return;
+ 	// find a normal slot
+ 	ei = CL_FindEmptyEvent();
+ 
+@@ -372,6 +373,13 @@
+ 	ei->fire_time = delay ? (cl.time + delay) : 0.0f;
+ 	ei->flags	= flags;
+ 	ei->args = *args;
++}
++
++qboolean CL_WebDemoEvent( int flags, int index, float delay, event_args_t *args )
++{
++ if( !CL_WebDemoActive() || CL_WebDemoSeeking() || index<1 || index>=MAX_EVENTS || !CL_EventIndex(cl.event_precache[index]) )return false;
++ CL_QueueEvent(flags,index,delay,args);
++ return true;
+ }
+ 
+ /*
+--- a/engine/client/s_main.c
++++ b/engine/client/s_main.c
+@@ -559,6 +559,7 @@
+ 	int	vol, ch_idx;
+ 	qboolean	bIgnore = false;
+ 
++ if( CL_WebDemoSeeking() ) return;
+ 	if( !dma.initialized ) return;
+ 	sfx = S_GetSfxByHandle( handle );
+ 	if( !sfx ) return;
+@@ -784,6 +785,7 @@
+ 	sfx_t	*sfx = NULL;
+ 	int	vol, fvox = 0;
+ 
++ if( CL_WebDemoSeeking() ) return;
+ 	if( !dma.initialized ) return;
+ 	sfx = S_GetSfxByHandle( handle );
+ 	if( !sfx ) return;

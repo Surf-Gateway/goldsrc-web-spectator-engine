@@ -1,0 +1,201 @@
+--- a/engine/client/cl_demo.c
++++ b/engine/client/cl_demo.c
+@@ -18,6 +18,7 @@
+ #include <emscripten.h>
+ #endif
+ #include "client.h"
++#include "demo_view.h"
+ #include "net_encode.h"
+ 
+ #define dem_unknown		0	// unknown command
+@@ -1556,6 +1557,54 @@
+ 
+ static hldemo_directory_t hldemo_directory;
+ 
++static sg_demo_view_t sgDemoView;
++static qboolean sgDemoViewValid;
++static int sgDemoMode = -1;
++
++static qboolean CL_WebDemoEnabled( void )
++{
++ if( sgDemoMode < 0 ) sgDemoMode = Sys_CheckParm( "-sg-demo-playback" ) != 0;
++ return sgDemoMode != 0;
++}
++
++int CL_WebDemoPlayer( void )
++{
++ return CL_WebDemoEnabled() && cls.demoplayback == DEMO_HLDEMO &&
++  !cls.spectator && sgDemoViewValid ? sgDemoView.player : 0;
++}
++
++const float *CL_WebDemoOrigin( void )
++{
++ return CL_WebDemoPlayer() ? sgDemoView.simorg : NULL;
++}
++
++double CL_WebDemoDisplayTime( void )
++{
++ return CL_WebDemoPlayer() ? sgDemoView.view_time : -1.0;
++}
++
++void CL_WebDemoView( ref_params_t *rp, qboolean afterClient )
++{
++ if( !CL_WebDemoPlayer() ) return;
++ VectorCopy( sgDemoView.origin, rp->vieworg );
++ VectorCopy( sgDemoView.angles, rp->viewangles );
++ AngleVectors( rp->viewangles, rp->forward, rp->right, rp->up );
++ rp->time = sgDemoView.view_time;
++ if( afterClient ) return;
++ VectorCopy( sgDemoView.simorg, rp->simorg );
++ VectorCopy( sgDemoView.velocity, rp->simvel );
++ VectorCopy( sgDemoView.height, rp->viewheight );
++ VectorCopy( sgDemoView.angles, rp->cl_viewangles );
++ VectorCopy( sgDemoView.punch, rp->punchangle );
++ rp->frametime = sgDemoView.frame_time;
++ rp->playernum = sgDemoView.player - 1;
++ rp->viewentity = sgDemoView.entity;
++ rp->health = sgDemoView.health;
++ rp->onground = sgDemoView.ground;
++ rp->waterlevel = sgDemoView.water;
++}
++
++
+ static qboolean CL_GoldSrcRead( void *dst, int bytes )
+ {
+ 	fs_offset_t pos = FS_Tell( cls.demofile );
+@@ -1603,6 +1652,7 @@
+ 	char game_dir[260];
+ 
+ 	memset( &hldemo_directory, 0, sizeof( hldemo_directory ));
++ sgDemoViewValid = false;
+ 
+ 	if( !CL_GoldSrcRead( stamp, sizeof( stamp )) || memcmp( stamp, "HLDEMO", 6 ))
+ 	{
+@@ -1695,6 +1745,7 @@
+ 		byte cmd;
+ 		float time;
+ 		int frame, message_length;
++  byte info[HLDEMO_INFO_SIZE];
+ 
+ 		if( hldemo_directory.index >= hldemo_directory.count )
+ 		{
+@@ -1805,7 +1856,7 @@
+ 
+ 		// Restore the receiving-side channel, as HLTV DemoFile::ReadSequenceInfo does.
+ 		// The recording proxy's outgoing sequence becomes the playback incoming sequence.
+-		if( !CL_GoldSrcSkip( HLDEMO_INFO_SIZE )
++		if( !CL_GoldSrcRead( info, HLDEMO_INFO_SIZE )
+ 			|| !CL_GoldSrcRead( &cls.netchan.incoming_sequence, sizeof( int ))
+ 			|| !CL_GoldSrcRead( &cls.netchan.incoming_acknowledged, sizeof( int ))
+ 			|| !CL_GoldSrcRead( &cls.netchan.incoming_reliable_acknowledged, sizeof( int ))
+@@ -1832,6 +1883,14 @@
+ 			return false;
+ 		}
+ 
++  if( CL_WebDemoEnabled() && hldemo_directory.index > 0 )
++  {
++   sg_demo_view_t sample;
++   int decoded = SG_DemoDecodeView( info, sizeof( info ), &sample );
++   if( decoded < 0 ) { CL_DemoCompleted(); return false; }
++   if( decoded > 0 ) { sgDemoView = sample; sgDemoViewValid = true; }
++  }
++
+ 		*length = message_length;
+ 		demo.timestamp = time;
+ 		demo.framecount++;
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -773,6 +773,10 @@
+ void CL_WriteDemoUserMessage( int size, byte *buffer );
+ qboolean CL_DemoReadMessage( byte *buffer, size_t *length );
+ void CL_DemoInterpolateAngles( void );
++int CL_WebDemoPlayer( void );
++const float *CL_WebDemoOrigin( void );
++double CL_WebDemoDisplayTime( void );
++void CL_WebDemoView( ref_params_t *rp, qboolean afterClient );
+ void CL_CheckStartupDemos( void );
+ void CL_WriteDemoJumpTime( void );
+ void CL_CloseDemoHeader( void );
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -415,12 +415,14 @@
+ 
+ 	do
+ 	{
++		CL_WebDemoView( &rp, false );
+ 		clgame.dllFuncs.pfnCalcRefdef( &rp );
++		CL_WebDemoView( &rp, true );
+ #ifdef __EMSCRIPTEN__
+ 		// This local app policy also covers recursive loading/reconnect draws,
+ 		// where temporary client state may no longer identify an HLTV stream.
+ 		if( sgSpectatorViewOnly < 0 ) sgSpectatorViewOnly = Sys_CheckParm( "-sg-spectator-only" ) != 0;
+-		if( sgSpectatorViewOnly &&
++		if( sgSpectatorViewOnly && !CL_WebDemoPlayer() &&
+ 			CL_GetPlayerDisplayTime( (int)Cvar_VariableValue( "_sg_web_target" )) < 0.0 )
+ 		{
+ 			ref.dllFuncs.R_ClearScreen();
+@@ -450,22 +452,23 @@
+ 	// The client DLL publishes its actual first-person target after CalcRefdef.
+ 	// Render time differs from the effective interpolated target pose time.
+ 	{
+-		int slot = (int)Cvar_VariableValue( "_sg_web_target" );
++		int slot = CL_WebDemoPlayer();
+ 		int userid = 0;
+ 		cl_entity_t *ent;
+ 		double playerTime;
++  if( !slot ) slot = (int)Cvar_VariableValue( "_sg_web_target" );
+ 		if( slot >= 1 && slot <= cl.maxclients && slot <= MAX_CLIENTS && cl.players[slot - 1].name[0] )
+ 			userid = cl.players[slot - 1].userid;
+ 		else slot = 0;
+ 		ent = slot ? &clgame.entities[slot] : NULL;
+-		playerTime = CL_GetPlayerDisplayTime( slot );
++		playerTime = CL_WebDemoPlayer() ? CL_WebDemoDisplayTime() : CL_GetPlayerDisplayTime( slot );
+ 		EM_ASM({
+ 			if(Module["onSGFrame"]) Module["onSGFrame"]($0, $1, $2, $3);
+ 			// Optional bounded test capture. Copy synchronously; retain no WASM views.
+ 			if(Module["onSGCamera"] && $4) Module["onSGCamera"]($0, $1, $2, $3,
+ 				[HEAPF32[$4>>2], HEAPF32[($4>>2)+1], HEAPF32[($4>>2)+2]],
+ 				[HEAPF32[$5>>2], HEAPF32[($5>>2)+1], HEAPF32[($5>>2)+2]]);
+-		}, rp.time, slot, userid, playerTime, ent ? ent->origin : NULL, rp.vieworg);
++		}, rp.time, slot, userid, playerTime, CL_WebDemoOrigin() ? CL_WebDemoOrigin() : ent ? ent->origin : NULL, rp.vieworg);
+ 	}
+ #endif
+ }
+--- /dev/null
++++ b/engine/client/demo_view.h
+@@ -0,0 +1,35 @@
++/* Numeric GoldSrc demo_info_t decoding. Timestamp precedes 232-byte ref_params.
++ * Never restore the recorded pointers, viewport, callbacks or opaque structs. */
++#ifndef SG_DEMO_VIEW_H
++#define SG_DEMO_VIEW_H
++#include <stdint.h>
++#include <string.h>
++#include <math.h>
++typedef struct {
++ float origin[3], angles[3], velocity[3], simorg[3], height[3], punch[3];
++ float view_time, frame_time; int player, entity, ground, water, health;
++} sg_demo_view_t;
++static uint32_t SG_DemoU32( const unsigned char *p ) {
++ return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
++}
++static float SG_DemoF32( const unsigned char *p ) { uint32_t u=SG_DemoU32(p);float f;memcpy(&f,&u,4);return f; }
++static int SG_DemoVector( const unsigned char *p, float *v, float limit ) {
++ int i;for(i=0;i<3;i++){v[i]=SG_DemoF32(p+i*4);if(!isfinite(v[i])||fabsf(v[i])>limit)return 0;}return 1;
++}
++/* 0: no recorded view; 1: valid view; -1: malformed numeric state. */
++static int SG_DemoDecodeView( const unsigned char *info, int length, sg_demo_view_t *out ) {
++ const unsigned char *p;sg_demo_view_t v;int clients;
++ if(length!=436)return -1;p=info+4;clients=(int32_t)SG_DemoU32(p+172);
++ if(clients==0)return 0;if(clients<1||clients>32)return -1;
++ memset(&v,0,sizeof(v));v.player=(int32_t)SG_DemoU32(p+180);v.entity=(int32_t)SG_DemoU32(p+176);
++ if(v.player<0||v.player>=clients||v.entity<1||v.entity>2048)return -1;v.player++;
++ if(!SG_DemoVector(p,v.origin,131072)||!SG_DemoVector(p+12,v.angles,360000)||
++    !SG_DemoVector(p+88,v.velocity,131072)||!SG_DemoVector(p+100,v.simorg,131072)||
++    !SG_DemoVector(p+112,v.height,1024)||!SG_DemoVector(p+160,v.punch,360000))return -1;
++ v.view_time=SG_DemoF32(p+64);v.frame_time=SG_DemoF32(p+60);
++ if(!isfinite(v.view_time)||fabsf(v.view_time)>1e9||!isfinite(v.frame_time)||v.frame_time<0||v.frame_time>1)return -1;
++ v.ground=(int32_t)SG_DemoU32(p+80);v.water=(int32_t)SG_DemoU32(p+84);v.health=(int32_t)SG_DemoU32(p+140);
++ if(v.ground<0||v.ground>1||v.water<0||v.water>3||v.health< -100000||v.health>100000)return -1;
++ *out=v;return 1;
++}
++#endif

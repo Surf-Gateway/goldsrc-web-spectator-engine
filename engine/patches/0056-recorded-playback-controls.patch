@@ -1,0 +1,269 @@
+--- a/engine/client/cl_demo.c
++++ b/engine/client/cl_demo.c
+@@ -1553,6 +1553,7 @@
+ 	int index;
+ 	int offset[HLDEMO_MAX_ENTRIES];
+ 	int end[HLDEMO_MAX_ENTRIES];
++ int type[HLDEMO_MAX_ENTRIES];
+ } hldemo_directory_t;
+ 
+ static hldemo_directory_t hldemo_directory;
+@@ -1576,6 +1577,94 @@
+ qboolean CL_WebDemoChecksumAbsent( uint32_t raw )
+ {
+  return SG_DemoChecksumMissing( CL_WebDemoActive(), sgDemoMapCrc, raw );
++}
++
++/* File controls are local, fixed-command operations; never a recording string. */
++static double sgDemoPosition, sgDemoOffset, sgDemoTarget = -1, sgDemoPending = -1;
++static double sgDemoUntil;
++static float sgDemoRate = 1, sgDemoResumeRate = 1;
++static int sgDemoSeeking, sgDemoWaitPicture, sgDemoEnded, sgDemoError;
++static int sgDemoBudgetFrame = -1, sgDemoRecords, sgDemoPackets, sgDemoTotalRecords;
++static float sgDemoRecordTime;
++
++qboolean CL_WebDemoPaused( void )
++{
++ return CL_WebDemoActive() && !sgDemoSeeking && !sgDemoWaitPicture &&
++  (sgDemoRate == 0 || sgDemoEnded || sgDemoError);
++}
++
++qboolean CL_WebDemoSeeking( void )
++{
++ return CL_WebDemoActive() && sgDemoSeeking;
++}
++
++static void CL_WebDemoRate( float rate )
++{
++ sgDemoRate = rate;
++ Cvar_SetValue( "sys_timescale", rate );
++}
++
++void CL_WebDemoPresented( void )
++{
++ if( !CL_WebDemoActive() ) return;
++ if( sgDemoWaitPicture )
++ {
++  sgDemoWaitPicture = false;
++  CL_WebDemoRate( sgDemoEnded ? 0 : sgDemoResumeRate );
++ }
++}
++
++#ifdef __EMSCRIPTEN__
++EMSCRIPTEN_KEEPALIVE int SG_DemoSetRate( double rate )
++{
++ if( !CL_WebDemoActive() || !isfinite(rate) || (rate != 0 && (rate < 0.1 || rate > 4)) ) return 0;
++ sgDemoResumeRate = rate;
++ if( !sgDemoSeeking && !sgDemoWaitPicture && !sgDemoEnded && !sgDemoError ) CL_WebDemoRate( rate );
++ return 1;
++}
++
++EMSCRIPTEN_KEEPALIVE int SG_DemoSeek( double seconds )
++{
++ if( !CL_WebDemoEnabled() || !isfinite(seconds) || seconds < 0 || seconds > 86400 ||
++  cls.demoplayback == DEMO_WEBSTREAM || !FS_FileExists( "spectate.dem", false ) ) return 0;
++ sgDemoPending = seconds;
++ CL_WebDemoRate( 1 ); /* A paused host must execute the fixed restart command. */
++ Cbuf_AddText( "playdemo spectate\n" );
++ return 1;
++}
++
++EMSCRIPTEN_KEEPALIVE void SG_DemoPublish( void )
++{
++ int phase, mode;
++ double position;
++ if( !CL_WebDemoEnabled() ) return;
++ phase = sgDemoError ? 6 : sgDemoEnded ? 5 : (sgDemoSeeking || sgDemoWaitPicture) ? 4 : sgDemoRate == 0 ? 3 : CL_WebDemoActive() ? 2 : 0;
++ mode = !CL_WebDemoActive() ? 0 : cls.spectator ? 1 : CL_WebDemoPlayer() ? 2 : 0;
++ position = sgDemoPosition;
++ if( phase == 2 && hldemo_directory.index < hldemo_directory.count && hldemo_directory.type[hldemo_directory.index] == 1 )
++  position = bound( sgDemoPosition, sgDemoOffset + CL_GetDemoPlaybackClock() - demo.starttime, 86400 );
++ EM_ASM({ if(Module["onSGDemoTick"]) Module["onSGDemoTick"]($0,$1,$2,$3,$4,$5); }, phase, position, mode, sgDemoResumeRate, sgDemoTarget, sgDemoError);
++}
++#endif
++
++static qboolean CL_WebDemoBudget( void )
++{
++ if( !CL_WebDemoActive() ) return true;
++ if( sgDemoBudgetFrame != host.framecount )
++ {
++  sgDemoBudgetFrame = host.framecount;
++  sgDemoRecords = sgDemoPackets = 0;
++  sgDemoUntil = Sys_DoubleTime() + 0.008;
++ }
++ return sgDemoRecords < 1024 && sgDemoPackets < 128 && Sys_DoubleTime() < sgDemoUntil;
++}
++
++static void CL_WebDemoFinishSeek( void )
++{
++ sgDemoSeeking = false;
++ sgDemoWaitPicture = true;
++ sgDemoPosition = sgDemoTarget;
++ demo.starttime = CL_GetDemoPlaybackClock() - (sgDemoTarget - sgDemoOffset);
+ }
+ 
+ int CL_WebDemoPlayer( void )
+@@ -1636,10 +1725,18 @@
+ 
+ static qboolean CL_GoldSrcNextEntry( void )
+ {
++ if( CL_WebDemoActive() && hldemo_directory.type[hldemo_directory.index] == 1 )
++  sgDemoOffset += fmax( 0, sgDemoRecordTime );
+ 	hldemo_directory.index++;
+ 
+ 	if( hldemo_directory.index >= hldemo_directory.count )
+ 	{
++  if( CL_WebDemoActive() )
++  {
++   sgDemoEnded = true; sgDemoSeeking = false; sgDemoWaitPicture = true;
++   sgDemoPosition = sgDemoOffset;
++   return false;
++  }
+ 		CL_DemoCompleted();
+ 		return false;
+ 	}
+@@ -1652,6 +1749,7 @@
+ 
+ 	demo.starttime = CL_GetDemoPlaybackClock();
+ 	demo.framecount = 0;
++ sgDemoRecordTime = 0;
+ 	return true;
+ }
+ 
+@@ -1664,6 +1762,19 @@
+ 
+ 	memset( &hldemo_directory, 0, sizeof( hldemo_directory ));
+  sgDemoViewValid = false;
++ if( CL_WebDemoEnabled() )
++ {
++  sgDemoPosition = sgDemoOffset = 0;
++  sgDemoRecordTime = 0;
++  sgDemoTotalRecords = sgDemoEnded = sgDemoError = sgDemoWaitPicture = 0;
++  sgDemoBudgetFrame = -1;
++  sgDemoTarget = sgDemoPending;
++  sgDemoPending = -1;
++  sgDemoSeeking = sgDemoTarget >= 0;
++  if( !sgDemoSeeking ) sgDemoResumeRate = 1;
++  CL_WebDemoRate( 1 );
++  if( FS_FileLength(cls.demofile) > 64 * 1024 * 1024 ) return false;
++ }
+ 
+ 	if( !CL_GoldSrcRead( stamp, sizeof( stamp )) || memcmp( stamp, "HLDEMO", 6 ))
+ 	{
+@@ -1726,6 +1837,7 @@
+ 		}
+ 		hldemo_directory.offset[i] = offset;
+ 		hldemo_directory.end[i] = offset + length;
++  hldemo_directory.type[i] = type;
+ 	}
+ 
+ 	hldemo_directory.count = entry_count;
+@@ -1750,6 +1862,7 @@
+ 	float elapsed;
+ 
+ 	*length = 0;
++ if( CL_WebDemoActive() && (CL_WebDemoPaused() || sgDemoEnded || sgDemoError) ) return false;
+ 
+ 	while( cls.demofile )
+ 	{
+@@ -1759,6 +1872,7 @@
+ 		int frame, message_length;
+   byte info[HLDEMO_INFO_SIZE];
+ 
++  if( !CL_WebDemoBudget() ) return false;
+ 		if( hldemo_directory.index >= hldemo_directory.count )
+ 		{
+ 			CL_DemoCompleted();
+@@ -1786,6 +1900,25 @@
+ 			CL_DemoCompleted();
+ 			return false;
+ 		}
++
++  if( CL_WebDemoActive() )
++  {
++   double wanted;
++   sgDemoRecords++;
++   if( hldemo_directory.type[hldemo_directory.index] == 1 )
++   {
++    wanted = sgDemoSeeking ? sgDemoTarget - sgDemoOffset : CL_GetDemoPlaybackClock() - demo.starttime;
++    if( demo.framecount > 0 && time > wanted )
++    {
++     FS_Seek( cls.demofile, command_pos, SEEK_SET );
++     if( sgDemoSeeking ) CL_WebDemoFinishSeek();
++     return false;
++    }
++    sgDemoRecordTime = time;
++    sgDemoPosition = sgDemoOffset + fmax(0,time);
++   }
++   if( ++sgDemoTotalRecords > 1000000 ) { sgDemoError = 2; CL_WebDemoRate(0); return false; }
++  }
+ 
+ 		if( cmd == 2 )
+ 			continue;
+@@ -1860,7 +1993,7 @@
+ 		}
+ 
+ 		elapsed = CL_GetDemoPlaybackClock() - demo.starttime;
+-		if( !cls.timedemo && demo.framecount != 0 && time > elapsed )
++		if( !CL_WebDemoActive() && !cls.timedemo && demo.framecount != 0 && time > elapsed )
+ 		{
+ 			FS_Seek( cls.demofile, command_pos, SEEK_SET );
+ 			return false;
+@@ -1906,6 +2039,7 @@
+ 		*length = message_length;
+ 		demo.timestamp = time;
+ 		demo.framecount++;
++  if( CL_WebDemoActive() ) sgDemoPackets++;
+ 
+ 		if( demo.framecount == 1 )
+ 			Con_Printf( "HLDEMO: first network message %d bytes at %.3f\n", message_length, time );
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -775,6 +775,9 @@
+ void CL_DemoInterpolateAngles( void );
+ int CL_WebDemoPlayer( void );
+ qboolean CL_WebDemoActive( void );
++qboolean CL_WebDemoPaused( void );
++qboolean CL_WebDemoSeeking( void );
++void CL_WebDemoPresented( void );
+ qboolean CL_WebDemoChecksumAbsent( uint32_t raw );
+ const float *CL_WebDemoOrigin( void );
+ double CL_WebDemoDisplayTime( void );
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -2769,7 +2769,7 @@
+ 	// decide the simulation time
+ 	cl.oldtime = cl.time;
+ 
+-	if( !cl.paused )
++	if( !cl.paused && !CL_WebDemoPaused() )
+ 		cl.time += host.frametime;
+ 
+ 	// demo time
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -400,6 +400,8 @@
+ 	static ref_params_t	rp;
+ 	ref_viewpass_t	rvp;
+ 	int		viewnum = 0;
++
++	if( CL_WebDemoSeeking() ) return;
+ 
+ 	if( !cl.video_prepped || ( !ui_renderworld.value && UI_IsVisible() && !cl.background ))
+ 		return; // still loading
+@@ -428,6 +430,7 @@
+ 			ref.dllFuncs.R_ClearScreen();
+ 			ref.dllFuncs.GL_BackendEndFrame();
+ 			EM_ASM({ if(Module["onSGWaiting"]) Module["onSGWaiting"]($0); }, rp.time);
++   CL_WebDemoPresented();
+ 			return;
+ 		}
+ #endif
+@@ -448,6 +451,7 @@
+ 	// draw debug triangles on a server
+ 	SV_DrawDebugTriangles ();
+ 	ref.dllFuncs.GL_BackendEndFrame ();
++ CL_WebDemoPresented();
+ #ifdef __EMSCRIPTEN__
+ 	// The client DLL publishes its actual first-person target after CalcRefdef.
+ 	// Render time differs from the effective interpolated target pose time.

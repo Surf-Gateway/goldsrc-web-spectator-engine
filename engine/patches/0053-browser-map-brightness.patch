@@ -1,0 +1,59 @@
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -834,6 +834,7 @@
+ extern convar_t r_studio_bounds_unique;
+ #ifdef __EMSCRIPTEN__
+ extern convar_t r_mip_rgba_pairs;
++extern convar_t r_sgtv_brightness;
+ #endif
+ extern convar_t r_gl2_alpha_reuse;
+ extern convar_t r_gl2_vector_reuse;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -50,6 +50,7 @@
+ CVAR_DEFINE_AUTO( r_studio_zero_local_light, "0", FCVAR_GLCONFIG, "exact zero-local-light studio vertex setup" );
+ #ifdef __EMSCRIPTEN__
+ CVAR_DEFINE_AUTO( r_mip_rgba_pairs, "0", FCVAR_GLCONFIG, "exact packed RGBA mip reduction (candidate)" );
++CVAR_DEFINE_AUTO( r_sgtv_brightness, "-1", 0, "local map light level (-1: map lighting, 0-25: a-z)" );
+ #endif
+ CVAR_DEFINE_AUTO( r_gl2_alpha_reuse, "0", FCVAR_GLCONFIG, "reuse exact alpha-reference uniforms per GL2 program" );
+ CVAR_DEFINE_AUTO( r_gl2_vector_reuse, "0", FCVAR_GLCONFIG, "reuse exact color/fog uniforms per GL2 program" );
+@@ -1194,6 +1195,7 @@
+     gEngfuncs.Cvar_RegisterVariable( &r_studio_bounds_unique );
+ #ifdef __EMSCRIPTEN__
+     gEngfuncs.Cvar_RegisterVariable( &r_mip_rgba_pairs );
++    gEngfuncs.Cvar_RegisterVariable( &r_sgtv_brightness );
+ #endif
+ 	gEngfuncs.Cvar_RegisterVariable( &r_gl2_alpha_reuse );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_gl2_vector_reuse );
+--- a/ref/gl/gl_rlight.c
++++ b/ref/gl/gl_rlight.c
+@@ -92,6 +92,13 @@
+ 
+ 		tr.lightstylevalue[i] = (int)l;
+ 	}
++#ifdef __EMSCRIPTEN__
++	// Match a single-letter SVC_LIGHTSTYLE for style 0. Source patterns and
++	// animation clocks keep advancing, so -1 restores current map lighting.
++	if( r_sgtv_brightness.value >= 0.0f && r_sgtv_brightness.value <= 25.0f &&
++		r_sgtv_brightness.value == (int)r_sgtv_brightness.value )
++		tr.lightstylevalue[0] = (int)r_sgtv_brightness.value * 22;
++#endif
+ }
+ 
+ /*
+--- a/engine/client/cl_demo.c
++++ b/engine/client/cl_demo.c
+@@ -761,6 +761,12 @@
+ }
+ 
+ #ifdef __EMSCRIPTEN__
++EMSCRIPTEN_KEEPALIVE void SG_SetBrightness( int level )
++{
++ if( level < -1 || level > 25 ) return;
++ Cvar_SetValue( "r_sgtv_brightness", level );
++}
++
+ EMSCRIPTEN_KEEPALIVE void SG_WebStart( void )
+ {
+  cls.legacymode = PROTO_GOLDSRC;

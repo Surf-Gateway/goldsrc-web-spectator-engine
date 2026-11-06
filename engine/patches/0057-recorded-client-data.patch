@@ -1,0 +1,253 @@
+--- /dev/null
++++ b/engine/client/demo_client.h
+@@ -0,0 +1,20 @@
++/* Only numeric CS client buffers reach the pinned unchecked Demo_ReadBuffer. */
++#ifndef SG_DEMO_CLIENT_H
++#define SG_DEMO_CLIENT_H
++#include <stdint.h>
++#include <string.h>
++#include <math.h>
++static int SG_DemoFovValid( float fov ) { return isfinite(fov) && (fov == 0 || (fov >= 1 && fov <= 179)); }
++static int SG_DemoClientBuffer( const unsigned char *bytes, int size ) {
++ int32_t kind, flag; float value; int i;
++ if(!bytes || size < 4 || size > 36)return 0;
++ memcpy(&kind,bytes,4);
++ if(kind == 1) { if(size != 8)return -1; memcpy(&value,bytes+4,4); return SG_DemoFovValid(value) ? 1 : -1; }
++ if(kind != 0)return 0;
++ if(size < 8)return -1; memcpy(&flag,bytes+4,4);
++ if(flag == 0)return size == 8 ? 1 : -1;
++ if(flag != 1 || size != 36)return -1;
++ for(i=0;i<6;i++) { memcpy(&value,bytes+12+i*4,4); if(!isfinite(value) || fabsf(value) > (i<3 ? 360000.0f : 131072.0f))return -1; }
++ return 1;
++}
++#endif
+--- a/engine/client/cl_demo.c
++++ b/engine/client/cl_demo.c
+@@ -19,6 +19,7 @@
+ #endif
+ #include "client.h"
+ #include "demo_view.h"
++#include "demo_client.h"
+ #include "net_encode.h"
+ 
+ #define dem_unknown		0	// unknown command
+@@ -1604,6 +1605,19 @@
+  Cvar_SetValue( "sys_timescale", rate );
+ }
+ 
++void CL_WebDemoFailure( void )
++{
++ if( !CL_WebDemoActive() ) return;
++ sgDemoError = 1; sgDemoSeeking = sgDemoWaitPicture = false;
++ CL_WebDemoRate( 0 );
++}
++
++static void CL_GoldSrcFailure( void )
++{
++ if( CL_WebDemoActive() ) CL_WebDemoFailure();
++ else CL_DemoCompleted();
++}
++
+ void CL_WebDemoPresented( void )
+ {
+  if( !CL_WebDemoActive() ) return;
+@@ -1636,14 +1650,19 @@
+ EMSCRIPTEN_KEEPALIVE void SG_DemoPublish( void )
+ {
+  int phase, mode;
+- double position;
++ double position, xy = -1, xyz = -1;
++ if( CL_WebDemoPlayer() )
++ {
++  xy = sqrt( sgDemoView.velocity[0]*sgDemoView.velocity[0] + sgDemoView.velocity[1]*sgDemoView.velocity[1] );
++  xyz = sqrt( xy*xy + sgDemoView.velocity[2]*sgDemoView.velocity[2] );
++ }
+  if( !CL_WebDemoEnabled() ) return;
+  phase = sgDemoError ? 6 : sgDemoEnded ? 5 : (sgDemoSeeking || sgDemoWaitPicture) ? 4 : sgDemoRate == 0 ? 3 : CL_WebDemoActive() ? 2 : 0;
+  mode = !CL_WebDemoActive() ? 0 : cls.spectator ? 1 : CL_WebDemoPlayer() ? 2 : 0;
+  position = sgDemoPosition;
+  if( phase == 2 && hldemo_directory.index < hldemo_directory.count && hldemo_directory.type[hldemo_directory.index] == 1 )
+   position = bound( sgDemoPosition, sgDemoOffset + CL_GetDemoPlaybackClock() - demo.starttime, 86400 );
+- EM_ASM({ if(Module["onSGDemoTick"]) Module["onSGDemoTick"]($0,$1,$2,$3,$4,$5); }, phase, position, mode, sgDemoResumeRate, sgDemoTarget, sgDemoError);
++ EM_ASM({ if(Module["onSGDemoTick"]) Module["onSGDemoTick"]($0,$1,$2,$3,$4,$5,$6,$7,$8); }, phase, position, mode, sgDemoResumeRate, sgDemoTarget, sgDemoError, xy, xyz, cl.local.scr_fov);
+ }
+ #endif
+ 
+@@ -1875,7 +1894,7 @@
+   if( !CL_WebDemoBudget() ) return false;
+ 		if( hldemo_directory.index >= hldemo_directory.count )
+ 		{
+-			CL_DemoCompleted();
++			CL_GoldSrcFailure();
+ 			return false;
+ 		}
+ 
+@@ -1891,13 +1910,13 @@
+ 			|| !CL_GoldSrcRead( &time, sizeof( time ))
+ 			|| !CL_GoldSrcRead( &frame, sizeof( frame )))
+ 		{
+-			CL_DemoCompleted();
++			CL_GoldSrcFailure();
+ 			return false;
+ 		}
+ 
+ 		if( !isfinite( time ) )
+ 		{
+-			CL_DemoCompleted();
++			CL_GoldSrcFailure();
+ 			return false;
+ 		}
+ 
+@@ -1932,29 +1951,40 @@
+ 
+ 		if( cmd == 3 )
+ 		{
+-			if( !CL_GoldSrcSkip( 64 ))
+-				return false;
++			if( !CL_GoldSrcSkip( 64 )) { CL_GoldSrcFailure(); return false; }
+ 			continue;
+ 		}
+ 
+ 		if( cmd == 4 )
+ 		{
+-			if( !CL_GoldSrcSkip( 32 ))
+-				return false;
++   float data[8];
++   union { int align; byte bytes[8]; } zoom;
++   int kind = 1;
++   if( !CL_GoldSrcRead( data, sizeof(data) )) { CL_GoldSrcFailure(); return false; }
++   if( CL_WebDemoPlayer() && clgame.hInstance )
++   {
++    if( !SG_DemoFovValid(data[7]) ) { CL_GoldSrcFailure(); return false; }
++    memcpy( zoom.bytes, &kind, 4 ); memcpy( zoom.bytes+4, &data[7], 4 );
++    clgame.dllFuncs.pfnDemo_ReadBuffer( 8, zoom.bytes );
++   }
+ 			continue;
+ 		}
+ 
+ 		if( cmd == 6 )
+ 		{
+-			if( !CL_GoldSrcSkip( 84 ))
+-				return false;
++			if( !CL_GoldSrcSkip( 84 )) { CL_GoldSrcFailure(); return false; }
+ 			continue;
+ 		}
+ 
+ 		if( cmd == 7 )
+ 		{
+-			if( !CL_GoldSrcSkip( 8 ))
+-				return false;
++   int animation[2];
++   if( !CL_GoldSrcRead(animation,sizeof(animation)) ) { CL_GoldSrcFailure(); return false; }
++   if( CL_WebDemoPlayer() )
++   {
++    if( animation[0] < 0 || animation[0] > 255 || animation[1] < 0 || animation[1] > 255 ) { CL_GoldSrcFailure(); return false; }
++    CL_WeaponAnim( animation[0], animation[1] );
++   }
+ 			continue;
+ 		}
+ 
+@@ -1967,7 +1997,7 @@
+ 				|| sample_size < 0 || sample_size > INT_MAX - 16
+ 				|| !CL_GoldSrcSkip( sample_size + 16 ))
+ 			{
+-				CL_DemoCompleted();
++				CL_GoldSrcFailure();
+ 				return false;
+ 			}
+ 			continue;
+@@ -1977,18 +2007,25 @@
+ 		{
+ 			int payload;
+ 
+-			if( !CL_GoldSrcRead( &payload, sizeof( payload )) || payload < 0 || !CL_GoldSrcSkip( payload ))
+-			{
+-				CL_DemoCompleted();
+-				return false;
+-			}
++   if( !CL_GoldSrcRead( &payload, sizeof(payload) ) || payload < 0 || payload > 1024*1024 )
++   { CL_GoldSrcFailure(); return false; }
++   if( CL_WebDemoActive() && payload <= 36 )
++   {
++    union { int align; byte bytes[36]; } data;
++    int valid;
++    if( !CL_GoldSrcRead(data.bytes,payload) ) { CL_GoldSrcFailure(); return false; }
++    valid = SG_DemoClientBuffer(data.bytes,payload);
++    if( valid < 0 ) { CL_GoldSrcFailure(); return false; }
++    if( valid && CL_WebDemoPlayer() && clgame.hInstance ) clgame.dllFuncs.pfnDemo_ReadBuffer(payload,data.bytes);
++   }
++   else if( !CL_GoldSrcSkip(payload) ) { CL_GoldSrcFailure(); return false; }
+ 			continue;
+ 		}
+ 
+ 		if( cmd != 0 && cmd != 1 )
+ 		{
+ 			Con_Printf( S_ERROR "HLDEMO: unknown command %d\n", cmd );
+-			CL_DemoCompleted();
++			CL_GoldSrcFailure();
+ 			return false;
+ 		}
+ 
+@@ -2011,20 +2048,20 @@
+ 			|| !CL_GoldSrcRead( &cls.netchan.last_reliable_sequence, sizeof( int ))
+ 			|| !CL_GoldSrcRead( &message_length, sizeof( message_length )))
+ 		{
+-			CL_DemoCompleted();
++			CL_GoldSrcFailure();
+ 			return false;
+ 		}
+ 
+ 		if( message_length < 0 || message_length > MAX_INIT_MSG )
+ 		{
+ 			Con_Printf( S_ERROR "HLDEMO: bad message length %d\n", message_length );
+-			CL_DemoCompleted();
++			CL_GoldSrcFailure();
+ 			return false;
+ 		}
+ 
+ 		if( message_length > 0 && !CL_GoldSrcRead( buffer, message_length ))
+ 		{
+-			CL_DemoCompleted();
++			CL_GoldSrcFailure();
+ 			return false;
+ 		}
+ 
+@@ -2032,7 +2069,7 @@
+   {
+    sg_demo_view_t sample;
+    int decoded = SG_DemoDecodeView( info, sizeof( info ), &sample );
+-   if( decoded < 0 ) { CL_DemoCompleted(); return false; }
++   if( decoded < 0 ) { CL_GoldSrcFailure(); return false; }
+    if( decoded > 0 ) { sgDemoView = sample; sgDemoViewValid = true; }
+   }
+ 
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -776,6 +776,7 @@
+ int CL_WebDemoPlayer( void );
+ qboolean CL_WebDemoActive( void );
+ qboolean CL_WebDemoPaused( void );
++void CL_WebDemoFailure( void );
+ qboolean CL_WebDemoSeeking( void );
+ void CL_WebDemoPresented( void );
+ qboolean CL_WebDemoChecksumAbsent( uint32_t raw );
+--- a/engine/client/cl_parse.c
++++ b/engine/client/cl_parse.c
+@@ -977,6 +977,7 @@
+ 		// validate map checksum
+ 		if( cl.worldmapCRC != cl.checksum && !unverifiedDemoMap )
+ 		{
++   CL_WebDemoFailure();
+ 			Con_Printf( S_ERROR "Your map [%s] differs from the server's.\n", clgame.mapname );
+ 			CL_Disconnect_f(); // for local game, call EndGame
+ 			Host_AbortCurrentFrame(); // to avoid svc_bad
+--- a/engine/client/cl_parse_gs.c
++++ b/engine/client/cl_parse_gs.c
+@@ -778,6 +778,7 @@
+ 			CL_ParseCvarValue( msg, true, PROTO_GOLDSRC );
+ 			break;
+ 		case svc_exec:
++   if( CL_WebDemoActive() ) { if( MSG_ReadByte(msg) ) MSG_ReadByte(msg); break; }
+ 			CL_ParseExec( msg );
+ 			break;
+ 		default:
