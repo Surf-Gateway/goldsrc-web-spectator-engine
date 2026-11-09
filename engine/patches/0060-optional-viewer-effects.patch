@@ -1,0 +1,76 @@
+--- a/engine/client/cl_parse.c
++++ b/engine/client/cl_parse.c
+@@ -2451,6 +2451,14 @@
+ 			EM_ASM({ if(Module["onSGTelemetry"]) Module["onSGTelemetry"](HEAPU8.slice($0, $0 + $1)); }, pbuf, iSize);
+ 			return;
+ 		}
++		if( !MSG_CheckOverflow( msg ) && iSize <= 192 && EM_ASM_INT({
++			const subscriptions = Module["sgUserMessages"];
++			if( !subscriptions || !subscriptions.size ) return 0;
++			const name = UTF8ToString($0);
++			if( !subscriptions.has(name) || !Module["onSGUserMessage"] ) return 0;
++			Module["onSGUserMessage"](name, HEAPU8.slice($1, $1 + $2));
++			return 1;
++		}, clgame.msg[i].name, pbuf, iSize )) return;
+ 	}
+ #endif
+ 
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -442,6 +442,21 @@
+ 			ref.dllFuncs.R_ClearScreen();
+ 		}
+ 
++#ifdef __EMSCRIPTEN__
++		// Optional local UI applies target-dependent effects before light styles
++		// and geometry are evaluated for this same interpolated player pose.
++		{
++			int slot = CL_WebDemoPlayer();
++			int userid = 0;
++			double playerTime;
++			if( !slot ) slot = (int)Cvar_VariableValue( "_sg_web_target" );
++			if( slot >= 1 && slot <= cl.maxclients && slot <= MAX_CLIENTS && cl.players[slot - 1].name[0] )
++				userid = cl.players[slot - 1].userid;
++			else slot = 0;
++			playerTime = CL_WebDemoPlayer() ? CL_WebDemoDisplayTime() : CL_GetPlayerDisplayTime( slot );
++			EM_ASM({ if(Module["onSGBeforeFrame"]) Module["onSGBeforeFrame"]($0, $1, $2, $3); }, rp.time, slot, userid, playerTime);
++		}
++#endif
+ 		GL_RenderFrame( &rvp );
+ 		S_UpdateFrame( &rvp );
+ 		viewnum++;
+--- a/engine/client/cl_demo.c
++++ b/engine/client/cl_demo.c
+@@ -766,7 +766,7 @@
+ #ifdef __EMSCRIPTEN__
+ EMSCRIPTEN_KEEPALIVE void SG_SetBrightness( int level )
+ {
+- if( level < -1 || level > 25 ) return;
++ if( level < -1 || level > 26 ) return;
+  Cvar_SetValue( "r_sgtv_brightness", level );
+ }
+ 
+--- a/ref/gl/gl_rlight.c
++++ b/ref/gl/gl_rlight.c
+@@ -98,6 +98,10 @@
+ 	if( r_sgtv_brightness.value >= 0.0f && r_sgtv_brightness.value <= 25.0f &&
+ 		r_sgtv_brightness.value == (int)r_sgtv_brightness.value )
+ 		tr.lightstylevalue[0] = (int)r_sgtv_brightness.value * 22;
++	// Exact scalar produced by CL_SetLightstyle(0, "#", ...). Keep this
++	// separate from z/100%; use the native source-light evaluation path.
++	else if( r_sgtv_brightness.value == 26.0f )
++		tr.lightstylevalue[0] = ('#' - 'a') * 22;
+ #endif
+ }
+ 
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -50,7 +50,7 @@
+ CVAR_DEFINE_AUTO( r_studio_zero_local_light, "0", FCVAR_GLCONFIG, "exact zero-local-light studio vertex setup" );
+ #ifdef __EMSCRIPTEN__
+ CVAR_DEFINE_AUTO( r_mip_rgba_pairs, "0", FCVAR_GLCONFIG, "exact packed RGBA mip reduction (candidate)" );
+-CVAR_DEFINE_AUTO( r_sgtv_brightness, "-1", 0, "local map light level (-1: map lighting, 0-25: a-z)" );
++CVAR_DEFINE_AUTO( r_sgtv_brightness, "-1", 0, "local map light level (-1: map lighting, 0-25: a-z, 26: #)" );
+ #endif
+ CVAR_DEFINE_AUTO( r_gl2_alpha_reuse, "0", FCVAR_GLCONFIG, "reuse exact alpha-reference uniforms per GL2 program" );
+ CVAR_DEFINE_AUTO( r_gl2_vector_reuse, "0", FCVAR_GLCONFIG, "reuse exact color/fog uniforms per GL2 program" );
