@@ -1,0 +1,11 @@
+--- a/engine/client/cl_demo.c
++++ b/engine/client/cl_demo.c
+@@ -1795,7 +1795,7 @@
+   sgDemoSeeking = sgDemoTarget >= 0;
+   if( !sgDemoSeeking ) sgDemoResumeRate = 1;
+   CL_WebDemoRate( 1 );
+-  if( FS_FileLength(cls.demofile) > 64 * 1024 * 1024 ) return false;
++  if( FS_FileLength(cls.demofile) > 128 * 1024 * 1024 ) return false;
+  }
+ 
+ 	if( !CL_GoldSrcRead( stamp, sizeof( stamp )) || memcmp( stamp, "HLDEMO", 6 ))
