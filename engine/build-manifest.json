@@ -59,7 +59,8 @@
         "0057-recorded-client-data.patch": "ae389726a9bae557d083981ac49f99d891a32052468bf985f9f80d8c0a6c4c84",
         "0058-recorded-effects.patch": "878666397c97fa1d77db1d60d1ba36e7eaacea3c7a1c84783e101c0da47328a7",
         "0059-larger-recorded-demos.patch": "aa0af142fc0f21f01ff8d2722981bddf42bf247e2c3f24275a50ce2fecfe4aa0",
-        "0060-optional-viewer-effects.patch": "34fe684f404ed54a36dd035bc93c0c2e6dd836be05c7c6070424245df2744bc7"
+        "0060-optional-viewer-effects.patch": "34fe684f404ed54a36dd035bc93c0c2e6dd836be05c7c6070424245df2744bc7",
+        "0061-world-only-model-precache.patch": "05f13bf8a2ae5405537efa47d5b05fe45bf4afe235baf2676116fc2e7e615fbd"
       },
       "generatedRuntime": {
         "schemaVersion": 1,
@@ -95,8 +96,8 @@
     },
     {
       "path": "xash3d-fwgs/build/engine/xash.wasm",
-      "bytes": 4152346,
-      "sha256": "f6cb995a1219fd172a5bfebb7c8ee15fd42e82b7910e067e8990e34bddca0e82"
+      "bytes": 4152351,
+      "sha256": "427d86cb7ee1974d020b13d45aa13a5feaed9b8a0bedea8d2c48ecd84839510e"
     },
     {
       "path": "xash3d-fwgs/build/filesystem/filesystem_stdio.wasm",
@@ -116,7 +117,7 @@
     {
       "path": "cs16-client/build/cl_dll/client_emscripten_javascript.wasm",
       "bytes": 381050,
-      "sha256": "2c729587b20d90b403ccc11ac170305abbd9ef72980aafb99b084738e31aaa8c"
+      "sha256": "f59d0fd0db65a7cbc4632c83473761d716332b628f7dcd950774e5d32f958bc1"
     },
     {
       "path": "cs16-client/build/3rdparty/mainui_cpp/menu_emscripten_javascript.wasm",

@@ -1,0 +1,11 @@
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -3173,5 +3173,7 @@
+ 		cl.models[pRes->nIndex] = Mod_LoadWorld( pRes->szFileName, true );
+ 		SetBits( pRes->ucFlags, RES_PRECACHED );
+-		cl.nummodels = 1;
++		// Model zero is reserved. Renderer handles use nummodels as an
++		// exclusive bound, including when the world is the only model.
++		cl.nummodels = pRes->nIndex + 1;
+ 		break;
+ 	}
