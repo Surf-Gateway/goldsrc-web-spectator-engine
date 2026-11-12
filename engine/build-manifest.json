@@ -60,7 +60,8 @@
         "0058-recorded-effects.patch": "878666397c97fa1d77db1d60d1ba36e7eaacea3c7a1c84783e101c0da47328a7",
         "0059-larger-recorded-demos.patch": "aa0af142fc0f21f01ff8d2722981bddf42bf247e2c3f24275a50ce2fecfe4aa0",
         "0060-optional-viewer-effects.patch": "34fe684f404ed54a36dd035bc93c0c2e6dd836be05c7c6070424245df2744bc7",
-        "0061-world-only-model-precache.patch": "05f13bf8a2ae5405537efa47d5b05fe45bf4afe235baf2676116fc2e7e615fbd"
+        "0061-world-only-model-precache.patch": "05f13bf8a2ae5405537efa47d5b05fe45bf4afe235baf2676116fc2e7e615fbd",
+        "0062-cutoff-static-entities.patch": "ec7988fb0faef2dfcd712608f345b8448d84ca8237b0ef719d671e7f5b5fe7e8"
       },
       "generatedRuntime": {
         "schemaVersion": 1,
@@ -91,13 +92,13 @@
   "artifacts": [
     {
       "path": "xash3d-fwgs/build/engine/xash.js",
-      "bytes": 533633,
-      "sha256": "03c806381a8b239fb34f51787f8d45bb18dbba455120619ece317d6618b40f49"
+      "bytes": 534559,
+      "sha256": "75f5b7e272c018a72142d79ac99aaac53d3be5659df261cc2960b422faf07bb9"
     },
     {
       "path": "xash3d-fwgs/build/engine/xash.wasm",
-      "bytes": 4152351,
-      "sha256": "427d86cb7ee1974d020b13d45aa13a5feaed9b8a0bedea8d2c48ecd84839510e"
+      "bytes": 4159564,
+      "sha256": "464e6850bb5bf4361148b25db0ec2768bee095801ce54788695f2a91c318e194"
     },
     {
       "path": "xash3d-fwgs/build/filesystem/filesystem_stdio.wasm",
@@ -117,7 +118,7 @@
     {
       "path": "cs16-client/build/cl_dll/client_emscripten_javascript.wasm",
       "bytes": 381050,
-      "sha256": "f59d0fd0db65a7cbc4632c83473761d716332b628f7dcd950774e5d32f958bc1"
+      "sha256": "3219fe71dc1cfd27a44271298dc304a2eeca38344d726129ecabbb7bcc1119ae"
     },
     {
       "path": "cs16-client/build/3rdparty/mainui_cpp/menu_emscripten_javascript.wasm",
@@ -136,8 +137,8 @@
       },
       "factorySha256": "40429ad1ceea01b5d767e10251b821ccbc571af9ecf59f37fb55f8f48c123e6e",
       "indexFactorySha256": "6c37e2c5ddf4aec145bc25775eb6b7c8c8e0166321d46d101da16dbfdbb73087",
-      "runtimeBeforeSha256": "12dc2b714dd204b59f75535abb211440f658657b51c3a035dd72bbbf9e038fbf",
-      "runtimeAfterSha256": "03c806381a8b239fb34f51787f8d45bb18dbba455120619ece317d6618b40f49",
+      "runtimeBeforeSha256": "67ee1bdc6d5b7d8e166c868a85dc266203b9fed9bd4be80b0ae59fbc2cf4da39",
+      "runtimeAfterSha256": "75f5b7e272c018a72142d79ac99aaac53d3be5659df261cc2960b422faf07bb9",
       "scope": "Private temporary attribute/index prefix uploads and exact unsigned maximum scanning; bounded CPU shadows; optional per-frame temporary buffer rings; independent explicit Module opt-ins."
     }
   }

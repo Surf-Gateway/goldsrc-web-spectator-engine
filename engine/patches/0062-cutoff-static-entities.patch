@@ -1,0 +1,588 @@
+diff -ru a/engine/client/cl_frame.c b/engine/client/cl_frame.c
+--- a/engine/client/cl_frame.c
++++ b/engine/client/cl_frame.c
+@@ -23,6 +23,9 @@
+ #include "dlight.h"
+ #include "sound.h"
+ #include "input.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ 
+ // #define STUDIO_INTERPOLATION_FIX
+ 
+@@ -1450,6 +1453,509 @@
+ }
+ 
+ /*
++==========================================================================
++
++SGTV: STATIC MAP ENTITIES BEYOND A FULL GOLDSRC ENTITY UPDATE
++
++A GoldSrc server stops filling an update at 256 entities (MAX_PACKET_ENTITIES)
++and gives an HLTV proxy no PVS, so a proxy receives the first 256 drawable
++entities in entity-number order on every update. When a frame is full, every
++entity numbered above the highest one in it was never examined. Draw only
++those whose baseline matches a map entity that nothing can toggle, move or
++remove, and only when a player at the camera would have received it (fat PVS
++of the eye against the entity's leaves). Baselines are never modified, so a
++later update still decodes from them.
++
++==========================================================================
++*/
++#define SG_CUT_PACKET_LIMIT	256	// GoldSrc and HLTV MAX_PACKET_ENTITIES
++#define SG_CUT_MAX_ADD		512	// firm cap on entities one frame may add
++#define SG_CUT_LEAF_POOL	65536
++#define SG_CUT_ENT_LEAFS	256	// more leaves: always visible (server: headnode test)
++#define SG_CUT_MAX_MAPENTS	4096
++#define SG_CUT_ORIGIN_EPS	1.0f	// baseline origins are 1/8-unit coordinates
++#define SG_CUT_STACK		256
++#define SG_CUT_UNMATCHED_NAMES	64
++
++CVAR_DEFINE_AUTO( cl_sg_cutoff_statics, "0", 0, "draw static map entities that a full GoldSrc entity update cut off" );
++
++enum
++{
++	SG_CUT_ADDED = 0,
++	SG_CUT_OFF,
++	SG_CUT_NO_FRAME,
++	SG_CUT_NOT_FULL,
++	SG_CUT_NOT_READY,
++	SG_CUT_NONE_ABOVE,
++	SG_CUT_NONE_STATIC,
++	SG_CUT_NO_VIS,
++	SG_CUT_CAMERA_SOLID,
++	SG_CUT_NONE_VISIBLE
++};
++
++enum
++{
++	SG_CUT_STATIC = 0,	// matched, allowed class, no targetname
++	SG_CUT_DYNAMIC,		// matched, but a class or name that can change
++	SG_CUT_UNMATCHED,	// no map entity with this model (and origin)
++	SG_CUT_NO_MODEL		// baseline model not loaded
++};
++
++typedef struct
++{
++	int	number;
++	int	kind;
++	int	leafStart;
++	int	leafCount;
++	qboolean	always;
++} sg_cut_cand_t;
++
++typedef struct
++{
++	uint	hash;
++	int	brush;	// submodel index, -1 for a point entity
++	vec3_t	origin;
++	qboolean	allowed;
++} sg_cut_mapent_t;
++
++static struct
++{
++	qboolean	pending;
++	qboolean	built;
++	const model_t	*world;
++	int	message;	// svc_spawnbaseline messages parsed
++	int	builtMessage;
++	int	baselineMessage[MAX_GOLDSRC_EDICTS];
++	int	numCand;
++	sg_cut_cand_t	cand[MAX_GOLDSRC_EDICTS];
++	int	numLeaves;
++	int	leaves[SG_CUT_LEAF_POOL];
++	int	lastDrawn[MAX_GOLDSRC_EDICTS];
++	int	serial;
++	int	numMapEnts;
++	sg_cut_mapent_t	mapEnts[SG_CUT_MAX_MAPENTS];
++	byte	pvs[(MAX_MAP_LEAFS + 7) / 8];
++	// per map
++	int	baselines, statics, dynamics, unmatched, noModel, always, mapEntities, builds;
++	// per frame
++	int	lastParse, framesSeen, fullFrames;
++	int	entities, highest, above, matched, visible, drawn, capped, inPacket, reason;
++} sgCut;
++
++void CL_SGCutoffBaselineMessage( void )
++{
++	sgCut.message++;
++	sgCut.built = false;
++}
++
++void CL_SGCutoffBaseline( int number )
++{
++	if( number >= 0 && number < MAX_GOLDSRC_EDICTS )
++		sgCut.baselineMessage[number] = sgCut.message;
++}
++
++static uint SGCutHash( const char *s )
++{
++	uint h = 2166136261u;
++
++	for( ; *s; s++ )
++	{
++		int c = (byte)*s;
++		if( c == '\\' ) c = '/';
++		if( c >= 'A' && c <= 'Z' ) c += 'a' - 'A';
++		h = ( h ^ (uint)c ) * 16777619u;
++	}
++	return h;
++}
++
++static qboolean SGCutStaticClass( const char *classname, int spawnflags )
++{
++	// env_sprite "play once" (2) turns itself off after its last frame.
++	if( !Q_stricmp( classname, "env_sprite" )) return !FBitSet( spawnflags, 2 );
++	return !Q_stricmp( classname, "cycler_sprite" ) || !Q_stricmp( classname, "cycler" ) ||
++		!Q_stricmp( classname, "env_glow" ) || !Q_stricmp( classname, "func_wall" ) ||
++		!Q_stricmp( classname, "func_illusionary" ) || !Q_stricmp( classname, "func_conveyor" );
++}
++
++static void SGCutParseMap( void )
++{
++	char	token[1024], key[256], classname[64], model[MAX_QPATH];
++	char	*pfile = cl.worldmodel ? cl.worldmodel->entities : NULL;
++	vec3_t	origin;
++	qboolean	named;
++	int	spawnflags;
++
++	sgCut.numMapEnts = 0;
++	sgCut.mapEntities = 0;
++	if( !pfile ) return;
++
++	while(( pfile = COM_ParseFile( pfile, token, sizeof( token ))) != NULL )
++	{
++		sg_cut_mapent_t *e;
++
++		if( token[0] != '{' ) return;
++		classname[0] = model[0] = 0;
++		VectorClear( origin );
++		named = false;
++		spawnflags = 0;
++
++		while( 1 )
++		{
++			if( !( pfile = COM_ParseFile( pfile, key, sizeof( key )))) return;
++			if( key[0] == '}' ) break;
++			if( !( pfile = COM_ParseFile( pfile, token, sizeof( token )))) return;
++			if( !Q_stricmp( key, "classname" )) Q_strncpy( classname, token, sizeof( classname ));
++			else if( !Q_stricmp( key, "model" )) Q_strncpy( model, token, sizeof( model ));
++			else if( !Q_stricmp( key, "targetname" )) named = token[0] != 0;
++			else if( !Q_stricmp( key, "spawnflags" )) spawnflags = Q_atoi( token );
++			else if( !Q_stricmp( key, "origin" ))
++			{
++				float x = 0.0f, y = 0.0f, z = 0.0f;
++				if( sscanf( token, "%f %f %f", &x, &y, &z ) == 3 ) VectorSet( origin, x, y, z );
++			}
++		}
++
++		sgCut.mapEntities++;
++		if( !model[0] || sgCut.numMapEnts >= SG_CUT_MAX_MAPENTS ) continue;
++		e = &sgCut.mapEnts[sgCut.numMapEnts++];
++		e->brush = model[0] == '*' ? Q_atoi( model + 1 ) : -1;
++		e->hash = SGCutHash( model );
++		VectorCopy( origin, e->origin );
++		e->allowed = !named && SGCutStaticClass( classname, spawnflags );
++	}
++}
++
++static int SGCutMatch( const entity_state_t *b, const model_t *mod )
++{
++	int	i, matches = 0;
++	qboolean	allowed = true;
++	int	brush = mod->name[0] == '*' ? Q_atoi( mod->name + 1 ) : -1;
++	uint	hash = SGCutHash( mod->name );
++
++	for( i = 0; i < sgCut.numMapEnts; i++ )
++	{
++		const sg_cut_mapent_t *e = &sgCut.mapEnts[i];
++
++		if( brush >= 0 )
++		{
++			if( e->brush != brush ) continue;
++		}
++		else
++		{
++			if( e->brush >= 0 || e->hash != hash ) continue;
++			if( fabs( e->origin[0] - b->origin[0] ) > SG_CUT_ORIGIN_EPS ||
++				fabs( e->origin[1] - b->origin[1] ) > SG_CUT_ORIGIN_EPS ||
++				fabs( e->origin[2] - b->origin[2] ) > SG_CUT_ORIGIN_EPS )
++				continue;
++		}
++		matches++;
++		if( !e->allowed ) allowed = false;
++	}
++
++	if( !matches ) return SG_CUT_UNMATCHED;
++	return allowed ? SG_CUT_STATIC : SG_CUT_DYNAMIC;
++}
++
++// The leaves the server links an entity into (SV_LinkEdict: absmin/absmax
++// grown by one unit; a rotated brush model uses its largest extent).
++static void SGCutLeaves( sg_cut_cand_t *c, const entity_state_t *b, const model_t *mod )
++{
++	const mnode_t	*stack[SG_CUT_STACK];
++	vec3_t	mins, maxs, lo, hi;
++	int	pending = 1, i;
++
++	c->leafStart = sgCut.numLeaves;
++	c->leafCount = 0;
++	c->always = false;
++
++	VectorCopy( b->mins, lo );
++	VectorCopy( b->maxs, hi );
++	if( mod->type == mod_brush && VectorIsNull( lo ) && VectorIsNull( hi ))
++	{
++		VectorCopy( mod->mins, lo );
++		VectorCopy( mod->maxs, hi );
++	}
++
++	if( mod->type == mod_brush && !VectorIsNull( b->angles ))
++	{
++		float max = 0.0f;
++		for( i = 0; i < 3; i++ )
++		{
++			max = Q_max( max, fabs( lo[i] ));
++			max = Q_max( max, fabs( hi[i] ));
++		}
++		for( i = 0; i < 3; i++ )
++		{
++			mins[i] = b->origin[i] - max - 1.0f;
++			maxs[i] = b->origin[i] + max + 1.0f;
++		}
++	}
++	else
++	{
++		for( i = 0; i < 3; i++ )
++		{
++			mins[i] = b->origin[i] + lo[i] - 1.0f;
++			maxs[i] = b->origin[i] + hi[i] + 1.0f;
++		}
++	}
++
++	stack[0] = cl.worldmodel->nodes;
++	while( pending )
++	{
++		const mnode_t *node = stack[--pending];
++		int sides;
++
++		if( node->contents == CONTENTS_SOLID ) continue;
++		if( node->contents < 0 )
++		{
++			const mleaf_t *leaf = (const mleaf_t *)node;
++			if( leaf->cluster < 0 ) continue;
++			if( c->leafCount >= SG_CUT_ENT_LEAFS || sgCut.numLeaves >= SG_CUT_LEAF_POOL )
++				goto always;
++			sgCut.leaves[sgCut.numLeaves++] = leaf->cluster;
++			c->leafCount++;
++			continue;
++		}
++
++		sides = BOX_ON_PLANE_SIDE( mins, maxs, node->plane );
++		if( pending + 2 > SG_CUT_STACK ) goto always;
++		if( sides & 1 ) stack[pending++] = node_child( node, 0, cl.worldmodel );
++		if( sides & 2 ) stack[pending++] = node_child( node, 1, cl.worldmodel );
++	}
++	return;
++
++always:
++	sgCut.numLeaves = c->leafStart;
++	c->leafCount = 0;
++	c->always = true;
++	sgCut.always++;
++}
++
++static void SGCutBuild( void )
++{
++	int	num, last = Q_min( clgame.maxEntities, MAX_GOLDSRC_EDICTS );
++
++	sgCut.built = true;
++	sgCut.builds++;
++	sgCut.world = cl.worldmodel;
++	sgCut.builtMessage = sgCut.message;
++	sgCut.numCand = sgCut.numLeaves = 0;
++	sgCut.baselines = sgCut.statics = sgCut.dynamics = sgCut.unmatched = sgCut.noModel = sgCut.always = 0;
++	// Entities may have been reallocated (a new connection or an instant-replay
++	// restart): every candidate starts again from its baseline.
++	memset( sgCut.lastDrawn, 0, sizeof( sgCut.lastDrawn ));
++	sgCut.serial = 2;
++
++	SGCutParseMap();
++#ifdef __EMSCRIPTEN__
++	EM_ASM({ Module["sgCutoffUnmatched"] = []; });
++#endif
++
++	for( num = cl.maxclients + 1; num < last; num++ )
++	{
++		const cl_entity_t *ent = CL_EDICT_NUM( num );
++		const entity_state_t *b = &ent->baseline;
++		const model_t *mod;
++		sg_cut_cand_t *c;
++
++		if( sgCut.baselineMessage[num] != sgCut.message || !b->modelindex ||
++			FBitSet( b->effects, EF_NODRAW ) || !FBitSet( b->entityType, ENTITY_NORMAL ))
++			continue;
++
++		sgCut.baselines++;
++		c = &sgCut.cand[sgCut.numCand++];
++		c->number = num;
++		c->leafStart = c->leafCount = 0;
++		c->always = false;
++		mod = CL_ModelHandle( b->modelindex );
++
++		if( !mod )
++		{
++			c->kind = SG_CUT_NO_MODEL;
++			sgCut.noModel++;
++			continue;
++		}
++
++		c->kind = SGCutMatch( b, mod );
++		if( c->kind == SG_CUT_STATIC )
++		{
++			sgCut.statics++;
++			SGCutLeaves( c, b, mod );
++		}
++		else if( c->kind == SG_CUT_DYNAMIC ) sgCut.dynamics++;
++		else
++		{
++			sgCut.unmatched++;
++#ifdef __EMSCRIPTEN__
++			EM_ASM({
++				const list = Module["sgCutoffUnmatched"];
++				if( list.length < $2 ) list.push({ number: $0, model: UTF8ToString($1) });
++			}, num, mod->name, SG_CUT_UNMATCHED_NAMES );
++#endif
++		}
++	}
++
++#ifdef __EMSCRIPTEN__
++	EM_ASM({
++		const s = Module["sgCutoffMap"] ??= {};
++		s.builds = $0; s.baselines = $1; s.static = $2; s.dynamic = $3; s.unmatched = $4;
++		s.noModel = $5; s.alwaysVisible = $6; s.mapEntities = $7; s.mapModels = $8; s.leaves = $9;
++		s.hasVis = Boolean($10);
++	}, sgCut.builds, sgCut.baselines, sgCut.statics, sgCut.dynamics, sgCut.unmatched, sgCut.noModel,
++	   sgCut.always, sgCut.mapEntities, sgCut.numMapEnts, sgCut.numLeaves, cl.worldmodel->visdata != NULL );
++#endif
++}
++
++static qboolean SGCutLink( int num )
++{
++	cl_entity_t *ent = CL_EDICT_NUM( num );
++
++	// Never a second copy of an entity the current update carries.
++	if( ent->curstate.messagenum == cl.parsecount )
++	{
++		sgCut.inPacket++;
++		return false;
++	}
++
++	if( sgCut.lastDrawn[num] != sgCut.serial - 1 || !ent->model || ent->index != num )
++	{
++		// (Re)start from the baseline, as a new stream entity would.
++		int messagenum = ent->curstate.messagenum;
++
++		ent->curstate = ent->baseline;
++		ent->curstate.number = num;
++		ent->curstate.messagenum = messagenum;
++		ent->curstate.msg_time = cl.mtime[0];
++		ent->prevstate = ent->curstate;
++		ent->player = false;
++		CL_ProcessEntityUpdate( ent );
++		VectorCopy( ent->curstate.origin, ent->latched.prevorigin );
++		VectorCopy( ent->curstate.angles, ent->latched.prevangles );
++		CL_ResetLatchedVars( ent, true );
++		CL_ResetPositions( ent );
++	}
++	sgCut.lastDrawn[num] = sgCut.serial;
++
++	if( !ent->model ) return false;
++
++	// As CL_LinkPacketEntities does for a static entity.
++	ent->curstate.animtime = ent->baseline.animtime;
++	ent->curstate.frame = ent->baseline.frame;
++	VectorCopy( ent->curstate.origin, ent->origin );
++	VectorCopy( ent->curstate.angles, ent->angles );
++
++	if( ent->model->type != mod_brush && !ent->curstate.rendercolor.r && !ent->curstate.rendercolor.g && !ent->curstate.rendercolor.b )
++		ent->curstate.rendercolor.r = ent->curstate.rendercolor.g = ent->curstate.rendercolor.b = 255;
++	if( ent->curstate.rendermode == kRenderNormal && ent->curstate.renderfx == kRenderFxNone )
++		ent->curstate.renderamt = 255.0f;
++
++	VectorCopy( ent->origin, ent->attachment[0] );
++	VectorCopy( ent->origin, ent->attachment[1] );
++	VectorCopy( ent->origin, ent->attachment[2] );
++	VectorCopy( ent->origin, ent->attachment[3] );
++
++	return CL_AddVisibleEntity( ent, ET_NORMAL );
++}
++
++static int SGCutAdd( const vec3_t vieworg )
++{
++	const frame_t	*frame = &cl.frames[cl.parsecountmod];
++	const mleaf_t	*leaf;
++	int	lo, hi, i;
++
++	sgCut.serial++;
++	sgCut.entities = sgCut.highest = 0;
++	sgCut.above = sgCut.matched = sgCut.visible = sgCut.drawn = sgCut.capped = sgCut.inPacket = 0;
++
++	if( !cl_sg_cutoff_statics.value ) return SG_CUT_OFF;
++	if( !frame->valid || cls.state != ca_active || !cls.packet_entities ) return SG_CUT_NO_FRAME;
++
++	sgCut.entities = frame->num_entities;
++	if( frame->num_entities > 0 )
++		sgCut.highest = cls.packet_entities[(frame->first_entity + frame->num_entities - 1) % cls.num_client_entities].number;
++	if( cl.parsecount != sgCut.lastParse )
++	{
++		sgCut.lastParse = cl.parsecount;
++		sgCut.framesSeen++;
++		if( frame->num_entities >= SG_CUT_PACKET_LIMIT ) sgCut.fullFrames++;
++	}
++
++	// Sorting the map's baselines once per map also gives every map its
++	// counters (sgCutoffMap); it changes nothing until a frame is full.
++	if( !cl.worldmodel || !cl.worldmodel->nodes || !cl.video_prepped || !sgCut.message ) return SG_CUT_NOT_READY;
++	if( !sgCut.built || sgCut.world != cl.worldmodel || sgCut.builtMessage != sgCut.message )
++		SGCutBuild();
++	if( frame->num_entities < SG_CUT_PACKET_LIMIT ) return SG_CUT_NOT_FULL;
++
++	// candidates are in ascending entity order
++	lo = 0; hi = sgCut.numCand;
++	while( lo < hi )
++	{
++		int mid = ( lo + hi ) / 2;
++		if( sgCut.cand[mid].number <= sgCut.highest ) lo = mid + 1;
++		else hi = mid;
++	}
++
++	for( i = lo; i < sgCut.numCand; i++ )
++	{
++		sgCut.above++;
++		if( sgCut.cand[i].kind == SG_CUT_STATIC ) sgCut.matched++;
++	}
++	if( !sgCut.above ) return SG_CUT_NONE_ABOVE;
++	if( !sgCut.matched ) return SG_CUT_NONE_STATIC;
++	if( !cl.worldmodel->visdata ) return SG_CUT_NO_VIS;
++
++	leaf = Mod_PointInLeaf( vieworg, cl.worldmodel->nodes, cl.worldmodel );
++	if( !leaf || leaf->contents == CONTENTS_SOLID || leaf->cluster < 0 ) return SG_CUT_CAMERA_SOLID;
++
++	// SV_FatPVS: the eye's leaves within 8 units
++	Mod_FatPVS( vieworg, 8.0f, sgCut.pvs, sizeof( sgCut.pvs ), false, false, false );
++
++	for( i = lo; i < sgCut.numCand; i++ )
++	{
++		const sg_cut_cand_t *c = &sgCut.cand[i];
++		qboolean visible = c->always;
++		int j;
++
++		if( c->kind != SG_CUT_STATIC ) continue;
++		for( j = 0; !visible && j < c->leafCount; j++ )
++			visible = CHECKVISBIT( sgCut.pvs, sgCut.leaves[c->leafStart + j] ) != 0;
++		if( !visible ) continue;
++
++		sgCut.visible++;
++		if( sgCut.drawn >= SG_CUT_MAX_ADD )
++		{
++			sgCut.capped++;
++			continue;
++		}
++		if( SGCutLink( c->number )) sgCut.drawn++;
++	}
++
++	return sgCut.drawn ? SG_CUT_ADDED : SG_CUT_NONE_VISIBLE;
++}
++
++void CL_SGCutoffAdd( const vec3_t vieworg )
++{
++	if( !sgCut.pending ) return;
++	sgCut.pending = false;
++	sgCut.reason = SGCutAdd( vieworg );
++#ifdef __EMSCRIPTEN__
++	EM_ASM({
++		const s = Module["sgCutoff"] ??= {};
++		s.enabled = Boolean($0);
++		s.reason = (["added", "off", "no-frame", "not-full", "not-ready", "none-above", "none-static", "no-vis", "camera-in-solid", "none-visible"])[$1] ?? "unknown";
++		s.framesSeen = $2; s.fullFrames = $3; s.entities = $4; s.highest = $5;
++		s.candidates = $6; s.matched = $7; s.visible = $8; s.drawn = $9; s.capped = $10;
++		s.inPacket = $11; s.cap = $12; s.renders = ( s.renders ?? 0 ) + 1;
++		s.addedRenders = ( s.addedRenders ?? 0 ) + ( $9 > 0 ? 1 : 0 );
++		s.maxDrawn = Math.max( s.maxDrawn ?? 0, $9 );
++	}, cl_sg_cutoff_statics.value != 0, sgCut.reason, sgCut.framesSeen, sgCut.fullFrames, sgCut.entities,
++	   sgCut.highest, sgCut.above, sgCut.matched, sgCut.visible, sgCut.drawn, sgCut.capped, sgCut.inPacket,
++	   SG_CUT_MAX_ADD );
++#endif
++}
++
++/*
+ ===============
+ CL_MoveThirdpersonCamera
+ 
+@@ -1505,6 +2011,9 @@
+ 	// link all the entities that actually have update
+ 	CL_LinkPacketEntities ( &cl.frames[cl.parsecountmod] );
+ 
++	// cut-off static map entities join once the camera is known (V_RenderView)
++	sgCut.pending = true;
++
+ 	// link custom user temp entities
+ 	clgame.dllFuncs.pfnCreateEntities();
+ 
+diff -ru a/engine/client/client.h b/engine/client/client.h
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -1045,6 +1045,10 @@
+ void CL_ProcessPacket( frame_t *frame );
+ void CL_MoveThirdpersonCamera( void );
+ void CL_EmitEntities( void );
++extern convar_t cl_sg_cutoff_statics;
++void CL_SGCutoffAdd( const vec3_t vieworg );
++void CL_SGCutoffBaselineMessage( void );
++void CL_SGCutoffBaseline( int number );
+ 
+ static inline qboolean CL_IsPlayerIndex( int idx )
+ {
+diff -ru a/engine/client/cl_main.c b/engine/client/cl_main.c
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -3455,6 +3455,7 @@
+ 	Cvar_RegisterVariable( &ui_renderworld );
+ 	Cvar_RegisterVariable( &cl_maxframetime );
+ 	Cvar_RegisterVariable( &cl_fixmodelinterpolationartifacts );
++	Cvar_RegisterVariable( &cl_sg_cutoff_statics );
+ 
+ 	// server commands
+ 	Cmd_AddCommand ("noclip", NULL, "enable or disable no clipping mode" );
+diff -ru a/engine/client/cl_parse.c b/engine/client/cl_parse.c
+--- a/engine/client/cl_parse.c
++++ b/engine/client/cl_parse.c
+@@ -1252,6 +1252,7 @@
+ 	const entity_state_t nullstate = { 0 };
+ 
+ 	Delta_InitClient ();	// finalize client delta's
++	CL_SGCutoffBaselineMessage();
+ 
+ 	while( 1 )
+ 	{
+@@ -1285,6 +1286,7 @@
+ 
+ 		ent = CL_EDICT_NUM( newnum );
+ 		ent->prevstate = nullstate;
++		CL_SGCutoffBaseline( newnum );
+ 		ent->index = newnum;
+ 
+ 		if( proto == PROTO_GOLDSRC )
+diff -ru a/engine/client/cl_view.c b/engine/client/cl_view.c
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -435,6 +435,7 @@
+ 		}
+ #endif
+ 		V_GetRefParams( &rp, &rvp );
++		if( viewnum == 0 ) CL_SGCutoffAdd( rvp.vieworigin );
+ 		V_RefApplyOverview( &rvp );
+ 
+ 		if( viewnum == 0 && FBitSet( rvp.flags, RF_ONLY_CLIENTDRAW ))
