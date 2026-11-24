@@ -61,7 +61,8 @@
         "0059-larger-recorded-demos.patch": "aa0af142fc0f21f01ff8d2722981bddf42bf247e2c3f24275a50ce2fecfe4aa0",
         "0060-optional-viewer-effects.patch": "34fe684f404ed54a36dd035bc93c0c2e6dd836be05c7c6070424245df2744bc7",
         "0061-world-only-model-precache.patch": "05f13bf8a2ae5405537efa47d5b05fe45bf4afe235baf2676116fc2e7e615fbd",
-        "0062-cutoff-static-entities.patch": "ec7988fb0faef2dfcd712608f345b8448d84ca8237b0ef719d671e7f5b5fe7e8"
+        "0062-cutoff-static-entities.patch": "ec7988fb0faef2dfcd712608f345b8448d84ca8237b0ef719d671e7f5b5fe7e8",
+        "0063-held-animated-light-styles.patch": "602195c4c2a985d26da1101e6621a4d2615eee46b4a44b66d5cf2d0fc0615d7f"
       },
       "generatedRuntime": {
         "schemaVersion": 1,
@@ -98,7 +99,7 @@
     {
       "path": "xash3d-fwgs/build/engine/xash.wasm",
       "bytes": 4159564,
-      "sha256": "464e6850bb5bf4361148b25db0ec2768bee095801ce54788695f2a91c318e194"
+      "sha256": "f38839a9de96222f40133a512e20ab7cc9977efe2f88f6bbbb971c17a025d882"
     },
     {
       "path": "xash3d-fwgs/build/filesystem/filesystem_stdio.wasm",
@@ -107,8 +108,8 @@
     },
     {
       "path": "xash3d-fwgs/build/ref/gl/libref_gles3compat.wasm",
-      "bytes": 334281,
-      "sha256": "6919b97ca493e86a3dd9a84ec4c363b7a7ee2885acf59bf74c452670e8b5f86d"
+      "bytes": 335096,
+      "sha256": "21c1893061e2d0d751b0857b689159b9e40df2bdb689364992c86978caf03da7"
     },
     {
       "path": "xash3d-fwgs/build/3rdparty/mainui/libmenu.wasm",
@@ -118,7 +119,7 @@
     {
       "path": "cs16-client/build/cl_dll/client_emscripten_javascript.wasm",
       "bytes": 381050,
-      "sha256": "3219fe71dc1cfd27a44271298dc304a2eeca38344d726129ecabbb7bcc1119ae"
+      "sha256": "43c23368f891458f1789d1eaf8b6e54a81b93ed6ecafd7e31827d2a04b10cb9a"
     },
     {
       "path": "cs16-client/build/3rdparty/mainui_cpp/menu_emscripten_javascript.wasm",

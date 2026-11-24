@@ -7,13 +7,13 @@ HLTV spectating in the browser and compiled to WebAssembly.
 
 Each engine build that goes live is tagged `build-<id>`; the spectator's
 licences page links to the tag of the build it serves. This is build
-`e68309cee9e34c546e0fdb3e`.
+`8e5c69612a89ceb6dd56c02c`.
 
 ## Contents
 
 - `engine/prepare-sources.py`: the upstream commits (d1f529fe125f of
   Xash3D FWGS, 08a2f2df22eb of cs16-client) and the patches applied to each.
-- `engine/patches/`: our 62 patches.
+- `engine/patches/`: our 63 patches.
 - `engine/runtime/`: small transforms applied to the generated `xash.js`.
 - `engine/build-pinned.sh`, `engine/record-build.py`: the build.
 - `engine/build-manifest.json`: patch and runtime hashes of this build and
@@ -31,7 +31,7 @@ engine/build-pinned.sh
 This fetches the upstream sources at the pinned commits, applies the patches,
 builds in the pinned Emscripten image
 (`docker.io/emscripten/emsdk@sha256:f8a157011b8fa61bdaab875bb1f0f08695229dffe086448d14b53538cae16bd3`)
-and writes `work/engine-build/e68309cee9e34c546e0fdb3e/build-manifest.json`. The directory
+and writes `work/engine-build/8e5c69612a89ceb6dd56c02c/build-manifest.json`. The directory
 name is derived from the pins and patch hashes, so the same sources always
 build into the same directory. cs16-client embeds its build date, so its
 client file differs by a few bytes from a build made on another day.

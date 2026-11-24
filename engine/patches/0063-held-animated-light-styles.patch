@@ -1,0 +1,106 @@
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -835,6 +835,7 @@
+ #ifdef __EMSCRIPTEN__
+ extern convar_t r_mip_rgba_pairs;
+ extern convar_t r_sgtv_brightness;
++extern convar_t r_sgtv_hold_styles;
+ #endif
+ extern convar_t r_gl2_alpha_reuse;
+ extern convar_t r_gl2_vector_reuse;
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -51,6 +51,7 @@
+ #ifdef __EMSCRIPTEN__
+ CVAR_DEFINE_AUTO( r_mip_rgba_pairs, "0", FCVAR_GLCONFIG, "exact packed RGBA mip reduction (candidate)" );
+ CVAR_DEFINE_AUTO( r_sgtv_brightness, "-1", 0, "local map light level (-1: map lighting, 0-25: a-z, 26: #)" );
++CVAR_DEFINE_AUTO( r_sgtv_hold_styles, "0", 0, "hold animated light styles (1-19, 21-31) at their pattern average" );
+ #endif
+ CVAR_DEFINE_AUTO( r_gl2_alpha_reuse, "0", FCVAR_GLCONFIG, "reuse exact alpha-reference uniforms per GL2 program" );
+ CVAR_DEFINE_AUTO( r_gl2_vector_reuse, "0", FCVAR_GLCONFIG, "reuse exact color/fog uniforms per GL2 program" );
+@@ -1196,6 +1197,7 @@
+ #ifdef __EMSCRIPTEN__
+     gEngfuncs.Cvar_RegisterVariable( &r_mip_rgba_pairs );
+     gEngfuncs.Cvar_RegisterVariable( &r_sgtv_brightness );
++    gEngfuncs.Cvar_RegisterVariable( &r_sgtv_hold_styles );
+ #endif
+ 	gEngfuncs.Cvar_RegisterVariable( &r_gl2_alpha_reuse );
+ 	gEngfuncs.Cvar_RegisterVariable( &r_gl2_vector_reuse );
+--- a/ref/gl/gl_rlight.c
++++ b/ref/gl/gl_rlight.c
+@@ -93,6 +93,24 @@
+ 		tr.lightstylevalue[i] = (int)l;
+ 	}
+ #ifdef __EMSCRIPTEN__
++	// Animated styles hold the average of their pattern. R_CheckLightMap then
++	// rebuilds their faces once in place instead of on every frame (the
++	// dynamic chain). Style 0 (brightness), 20 and switchable styles (32+)
++	// keep their native evaluation; dynamic lights are unaffected.
++	if( r_sgtv_hold_styles.value != 0.0f )
++	{
++		for( i = 1; i < 32; i++ )
++		{
++			float sum = 0.0f;
++			int k;
++
++			if( i == 20 || ls[i].length < 2 )
++				continue;
++			for( k = 0; k < ls[i].length; k++ )
++				sum += ls[i].map[k];
++			tr.lightstylevalue[i] = (int)( sum * 22.0f / ls[i].length );
++		}
++	}
+ 	// Match a single-letter SVC_LIGHTSTYLE for style 0. Source patterns and
+ 	// animation clocks keep advancing, so -1 restores current map lighting.
+ 	if( r_sgtv_brightness.value >= 0.0f && r_sgtv_brightness.value <= 25.0f &&
+--- a/ref/gl/gl_rsurf.c
++++ b/ref/gl/gl_rsurf.c
+@@ -1423,7 +1423,13 @@
+ 	{
+ 		const int style = fa->styles[maps];
+ 
++#ifdef __EMSCRIPTEN__
++		// Held animated styles change only when the hold starts or a style is
++		// replaced: update those faces in place, like style 0.
++		if( maps < MAXLIGHTMAPS && ( style >= 32 || style == 0 || style == 20 || r_sgtv_hold_styles.value != 0.0f ) && fa->dlightframe != tr.framecount )
++#else
+ 		if( maps < MAXLIGHTMAPS && ( style >= 32 || style == 0 || style == 20 ) && fa->dlightframe != tr.framecount )
++#endif
+ 		{
+ 			byte		temp[132*132*4];
+ 			mextrasurf_t	*info = fa->info;
+@@ -4093,6 +4099,34 @@
+ 
+ 	LM_UploadBlock( false );
+ 
++#ifdef __EMSCRIPTEN__
++	// Report how many lit faces of this map use animated light styles, so
++	// the viewer can hold them when frames are slow (r_sgtv_hold_styles).
++	if( WORLDMODEL )
++	{
++		int faces = 0, animated = 0;
++
++		for( j = 0; j < WORLDMODEL->numsurfaces; j++ )
++		{
++			const msurface_t *s = WORLDMODEL->surfaces + j;
++			int k;
++
++			if( !s->samples || FBitSet( s->flags, SURF_DRAWTILED|SURF_DRAWSKY ))
++				continue;
++			faces++;
++			for( k = 0; k < MAXLIGHTMAPS && s->styles[k] != 255; k++ )
++			{
++				if( s->styles[k] >= 1 && s->styles[k] < 32 && s->styles[k] != 20 )
++				{
++					animated++;
++					break;
++				}
++			}
++		}
++		EM_ASM({const s=Module["sgLightStyles"]={};s.schemaVersion=1;s.faces=$0;s.animatedFaces=$1;},faces,animated);
++	}
++#endif
++
+ 	if( gEngfuncs.drawFuncs->GL_BuildLightmaps )
+ 	{
+ 		// build lightmaps on the client-side
